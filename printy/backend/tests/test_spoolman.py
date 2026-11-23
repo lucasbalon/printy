@@ -100,7 +100,8 @@ def test_spool_change_flow(monkeypatch):
     with SessionLocal() as s:
         j = s.get(Job, job["id"])
         assert j.status == "printing"
-        j.started_at = utcnow() - timedelta(minutes=5)
+        j.started_at = utcnow() - timedelta(minutes=11)  # past the start grace
+        scheduler._seen_running.add(j.id)  # the demo print ends before a tick sees it
         s.commit()
     loop.run_until_complete(step())
     with SessionLocal() as s:
@@ -222,7 +223,8 @@ def test_klipper_tracks_the_spool(monkeypatch):
         loop.run_until_complete(asyncio.sleep(0.05))
     with SessionLocal() as s:
         j = s.get(Job, job["id"])
-        j.started_at = utcnow() - timedelta(minutes=5)
+        j.started_at = utcnow() - timedelta(minutes=11)  # past the start grace
+        scheduler._seen_running.add(j.id)  # the demo print ends before a tick sees it
         s.commit()
     loop.run_until_complete(refresh())
     loop.run_until_complete(scheduler.tick())

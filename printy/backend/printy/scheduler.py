@@ -313,10 +313,12 @@ class Scheduler:
 
     async def _follow_print(self, s: Session, job: Job, status, opts: dict) -> None:  # noqa: ANN001
         now = utcnow()
-        if status.progress is not None:
-            self._last_progress[job.id] = status.progress
-        if status.state in (PrinterState.PRINTING, PrinterState.PAUSED, PrinterState.BUSY):
+        running = status.state in (PrinterState.PRINTING, PrinterState.PAUSED)
+        if running:
+            # outside of a running print, the progress may be the previous print's 100 %
             self._seen_running.add(job.id)
+            if status.progress is not None:
+                self._last_progress[job.id] = status.progress
         if status.state == PrinterState.PAUSED and job.status != JobStatus.PAUSED:
             job.status = JobStatus.PAUSED
             add_event(job, "paused", "Impression en pause.")
@@ -331,10 +333,11 @@ class Scheduler:
             add_event(job, "error", status.message or "L’imprimante signale une erreur.")
             await self._close_print(s, job, opts, success=False)
         elif status.state in (PrinterState.FINISHED, PrinterState.IDLE):
-            started = job.id in self._seen_running or self._last_progress.get(job.id, 0) > 0
-            if status.state == PrinterState.IDLE and not started:
-                if now - (job.started_at or now) < START_GRACE:
-                    return  # the printer has not picked up the job yet (heating, calibration…)
+            # A K2 goes through several states after the start (previous print's "finished",
+            # idle, heating, calibration): nothing is concluded during the first minutes.
+            if now - (job.started_at or now) < START_GRACE:
+                return
+            if job.id not in self._seen_running:
                 # never seen printing: the start command was ignored, nothing was printed
                 job.status = JobStatus.NEEDS_ATTENTION
                 job.started_at = None

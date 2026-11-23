@@ -6,6 +6,7 @@ from datetime import timedelta
 
 from fastapi.testclient import TestClient
 
+from printy.drivers import PrinterState
 from printy.db import SessionLocal, init_db, utcnow
 from printy.ha import ha
 from printy.main import app
@@ -39,7 +40,7 @@ def test_full_cycle(monkeypatch):
     assert client.get(f"/api/v1/sliced/{sliced_id}/thumbnail").status_code == 200
 
     p = client.post("/api/v1/printers", json={
-        "name": "Démo", "driver": "demo", "options": {"speed": 1_000_000},
+        "name": "Démo", "driver": "demo", "options": {"speed": 1},
         "switch_entity": "switch.prise_k2", "camera_source": "none", "power_on_lead_min": 5,
     })
     assert p.status_code == 201, p.text
@@ -82,12 +83,20 @@ def test_full_cycle(monkeypatch):
     loop.run_until_complete(step())
     loop.run_until_complete(asyncio.sleep(0.05))  # background launch
     assert status() == "printing"
+    loop.run_until_complete(step())  # seen printing
+
+    # the print ends within the first minutes: not concluded yet (the K2 flickers at start)
+    driver = manager.live[pid].driver
+    driver.speed = 1_000_000
+    loop.run_until_complete(step())
+    assert status() == "printing"
 
     with SessionLocal() as s:
-        s.get(Job, jid).started_at = utcnow() - timedelta(minutes=5)
+        s.get(Job, jid).started_at = utcnow() - timedelta(minutes=11)
         s.commit()
     loop.run_until_complete(step())
     assert status() == "finished"
+    assert next(p for p in client.get("/api/v1/printers").json() if p["id"] == pid)["piece_on_bed"] is True
     assert sent[-1][1] == [f"PRINTY_BEDCLEAR_{pid}"]
 
     # still hot: power stays on; once cool it goes off
@@ -210,7 +219,12 @@ def test_ignored_start_is_not_taken_for_a_cancel(monkeypatch):
     loop.run_until_complete(step())
     assert job().status == "printing"
 
-    # past the grace period: flagged, not counted as an interrupted print
+    # a stale "finished" from the previous print is not taken for the end of this one
+    manager.live[pid].driver.state = PrinterState.FINISHED
+    loop.run_until_complete(step())
+    assert job().status == "printing"
+
+    # past the grace period: flagged, not counted as a finished or interrupted print
     with SessionLocal() as s:
         s.get(Job, jid).started_at = utcnow() - timedelta(minutes=11)
         s.commit()

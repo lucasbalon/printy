@@ -63,7 +63,17 @@ async function onDeleted() {
 }
 
 const powering = ref<number | null>(null);
-async function power(p: Printer, on: boolean) {
+async function power(p: Printer, on: boolean, input: HTMLInputElement) {
+  const busy = ["printing", "paused", "busy"].includes(p.live.state);
+  const msg = on
+    ? `Allumer la prise de ${p.name} ?`
+    : busy
+      ? `${p.name} est en train d’imprimer. Couper la prise arrêtera l’impression, qui sera perdue. Couper quand même ?`
+      : `Couper la prise de ${p.name} ?`;
+  if (!window.confirm(msg)) {
+    input.checked = !on; // the click already flipped the switch
+    return;
+  }
   powering.value = p.id;
   await attempt(() => api.post(`/printers/${p.id}/power`, { on }), on ? "Prise allumée." : "Prise coupée.");
   powering.value = null;
@@ -189,7 +199,7 @@ async function bedClear(p: Printer) {
                   type="checkbox"
                   :checked="!!p.live.power_on"
                   :disabled="powering === p.id || p.live.power_on === null"
-                  @change="power(p, ($event.target as HTMLInputElement).checked)"
+                  @change="power(p, ($event.target as HTMLInputElement).checked, $event.target as HTMLInputElement)"
                 />
                 <span class="switch__track" aria-hidden="true" />
                 <span class="switch__text">
@@ -202,7 +212,7 @@ async function bedClear(p: Printer) {
 
             <div class="row bed">
               <span v-if="p.bed_clear" class="status status--ok">Plateau libéré</span>
-              <template v-else-if="p.live.state === 'finished'">
+              <template v-else-if="p.piece_on_bed && !['printing', 'paused'].includes(p.live.state)">
                 <span class="status status--warn">Pièce sur le plateau</span>
                 <button type="button" class="btn btn--secondary btn--sm" @click="bedClear(p)">J’ai vidé le plateau</button>
               </template>

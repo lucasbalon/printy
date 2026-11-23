@@ -107,6 +107,7 @@ export interface Printer {
   power_on_lead_min: number;
   cooldown_temp: number;
   bed_clear: boolean;
+  piece_on_bed: boolean;
   loaded_spool_id: number | null;
   sort_order: number;
   live: PrinterLive;

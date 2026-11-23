@@ -89,6 +89,8 @@ def printer(p: Printer) -> dict[str, Any]:
         "power_on_lead_min": p.power_on_lead_min,
         "cooldown_temp": p.cooldown_temp,
         "bed_clear": p.bed_clear,
+        # a finished print has not been declared removed yet
+        "piece_on_bed": p.last_finished_at is not None and not p.bed_clear,
         "loaded_spool_id": p.loaded_spool_id,
         "sort_order": p.sort_order,
         "live": {

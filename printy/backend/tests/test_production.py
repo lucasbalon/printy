@@ -67,7 +67,8 @@ def test_print_feeds_stock_and_energy(monkeypatch):
     with SessionLocal() as s:
         j = s.get(Job, job["id"])
         assert j.status == "printing"
-        j.started_at = utcnow() - timedelta(minutes=5)
+        j.started_at = utcnow() - timedelta(minutes=11)  # past the start grace
+        scheduler._seen_running.add(j.id)  # the demo print ends before a tick sees it
         s.commit()
     scheduler._metered_at[job["id"]] = time.monotonic() - 60  # one minute of printing at 300 W
     loop.run_until_complete(step())
