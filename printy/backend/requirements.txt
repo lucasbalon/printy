@@ -1,0 +1,8 @@
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+sqlalchemy==2.1.9
+httpx==0.28.1
+websockets==17.4
+python-multipart==0.0.34
+tzdata==2026.6
+paho-mqtt==2.1.0
