@@ -34,6 +34,8 @@ log = logging.getLogger(__name__)
 
 TICK_S = 5
 OFFLINE_GRACE = timedelta(minutes=10)
+# After the start command, how long the printer may stay idle (heating, calibration)
+START_GRACE = timedelta(minutes=10)
 SNAPSHOT_DIR = config.data_dir / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -54,6 +56,7 @@ class Scheduler:
         self._background: set[asyncio.Task[None]] = set()
         self._powered_by_us: set[int] = set()
         self._last_progress: dict[int, float] = {}
+        self._seen_running: set[int] = set()  # jobs the printer was seen working on
         self._metered_at: dict[int, float] = {}
         self.errors: dict[str, dict[str, str]] = {}  # last error per step, for the diagnostics  # job id -> last energy sample (monotonic)
 
@@ -312,6 +315,8 @@ class Scheduler:
         now = utcnow()
         if status.progress is not None:
             self._last_progress[job.id] = status.progress
+        if status.state in (PrinterState.PRINTING, PrinterState.PAUSED, PrinterState.BUSY):
+            self._seen_running.add(job.id)
         if status.state == PrinterState.PAUSED and job.status != JobStatus.PAUSED:
             job.status = JobStatus.PAUSED
             add_event(job, "paused", "Impression en pause.")
@@ -319,14 +324,30 @@ class Scheduler:
             job.status = JobStatus.PRINTING
             add_event(job, "resumed", "Impression reprise.")
         elif status.state == PrinterState.ERROR:
+            self._seen_running.discard(job.id)
             job.status = JobStatus.FAILED
             job.finished_at = now
             self._record_usage(job, self._last_progress.pop(job.id, 0))
             add_event(job, "error", status.message or "L’imprimante signale une erreur.")
             await self._close_print(s, job, opts, success=False)
         elif status.state in (PrinterState.FINISHED, PrinterState.IDLE):
-            if now - (job.started_at or now) < timedelta(minutes=1):
-                return  # the printer has not picked up the job yet
+            started = job.id in self._seen_running or self._last_progress.get(job.id, 0) > 0
+            if status.state == PrinterState.IDLE and not started:
+                if now - (job.started_at or now) < START_GRACE:
+                    return  # the printer has not picked up the job yet (heating, calibration…)
+                # never seen printing: the start command was ignored, nothing was printed
+                job.status = JobStatus.NEEDS_ATTENTION
+                job.started_at = None
+                add_event(job, "attention", "L’imprimante n’a pas démarré l’impression.")
+                self._metered_at.pop(job.id, None)
+                await ha.notify(
+                    opts["notify_targets"],
+                    f"{job.printer.name} : impression non démarrée",
+                    f"{job.sliced_file.model.name} a été envoyée mais l’imprimante ne l’a pas lancée.",
+                    tag=f"printy-job-{job.id}",
+                )
+                return
+            self._seen_running.discard(job.id)
             progress = self._last_progress.pop(job.id, 0)
             done = status.state == PrinterState.FINISHED or progress > 0.98
             job.finished_at = now

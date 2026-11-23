@@ -25,6 +25,19 @@ class MoonrakerClient:
         self.base = f"http://{host}:{port}"
         headers = {"X-Api-Key": api_key} if api_key else {}
         self.http = httpx.AsyncClient(base_url=self.base, headers=headers, timeout=10)
+        self._gcodes_path: str | None = None
+
+    async def gcodes_path(self) -> str | None:
+        """Absolute path of Moonraker's "gcodes" root on the printer (where uploads land)."""
+        if self._gcodes_path is None:
+            try:
+                roots = await self.get("/server/files/roots")
+            except (httpx.HTTPError, ValueError):
+                return None
+            for root in roots or []:
+                if root.get("name") == "gcodes" and root.get("path"):
+                    self._gcodes_path = str(root["path"]).rstrip("/")
+        return self._gcodes_path
 
     async def close(self) -> None:
         await self.http.aclose()

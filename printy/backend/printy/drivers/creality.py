@@ -24,6 +24,7 @@ from .moonraker import MoonrakerClient
 
 log = logging.getLogger(__name__)
 
+# Fallback only: the real folder is asked to Moonraker (K1: /usr/data/…, K2: /mnt/UDISK/…)
 GCODE_DIR = "/usr/data/printer_data/gcodes"
 
 # Community-documented "state" codes on Creality OS
@@ -149,9 +150,9 @@ class CrealityDriver(PrinterDriver):
         return await self._uploader.set_active_spool(spool_id)
 
     async def start(self, remote_name: str) -> None:
-        await self._send(
-            {"method": "set", "params": {"opGcodeFile": f"printprt:{GCODE_DIR}/{remote_name}"}}
-        )
+        folder = await self._uploader.gcodes_path() or GCODE_DIR
+        log.info("creality %s: start %s/%s", self.host, folder, remote_name)
+        await self._send({"method": "set", "params": {"opGcodeFile": f"printprt:{folder}/{remote_name}"}})
 
     async def pause(self) -> None:
         await self._send({"method": "set", "params": {"pause": 1}})

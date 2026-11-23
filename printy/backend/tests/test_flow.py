@@ -161,3 +161,60 @@ def test_print_started_outside_printy():
     assert later.status_code == 201
     loop.run_until_complete(driver.cancel())
     loop.close()
+
+
+def test_ignored_start_is_not_taken_for_a_cancel(monkeypatch):
+    """The printer accepts the file but never starts: wait, then flag it (no false cancel)."""
+    init_db()
+    sent = []
+
+    async def fake_notify(targets, title, message, **kw):
+        sent.append(title)
+
+    monkeypatch.setattr(ha, "notify", fake_notify)
+    client = TestClient(app)
+    pid = client.post("/api/v1/printers", json={
+        "name": "Muette", "driver": "demo", "options": {"speed": 1}, "camera_source": "none",
+    }).json()["id"]
+    r = client.post("/api/v1/upload", files=[("files", ("muette.gcode", io.BytesIO(ORCA.encode() + b"; mute\n")))])
+    sliced_id = client.get(f"/api/v1/models/{r.json()['imported'][0]['model_id']}").json()["sliced"][0]["id"]
+    jid = client.post("/api/v1/jobs", json={
+        "sliced_file_id": sliced_id, "printer_id": pid, "start_at": utcnow().isoformat(), "confirm_required": False,
+    }).json()["id"]
+
+    async def step():
+        await manager.sync()
+        await manager.refresh_all()
+        await scheduler.tick()
+
+    def job():
+        with SessionLocal() as s:
+            return s.get(Job, jid)
+
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(manager.sync())
+
+    async def ignored(name):
+        return None
+
+    monkeypatch.setattr(manager.live[pid].driver, "start", ignored)
+    for _ in range(4):
+        loop.run_until_complete(step())
+        loop.run_until_complete(asyncio.sleep(0.05))
+    assert job().status == "printing"
+
+    # two minutes later, still idle: heating or calibrating, keep waiting
+    with SessionLocal() as s:
+        s.get(Job, jid).started_at = utcnow() - timedelta(minutes=2)
+        s.commit()
+    loop.run_until_complete(step())
+    assert job().status == "printing"
+
+    # past the grace period: flagged, not counted as an interrupted print
+    with SessionLocal() as s:
+        s.get(Job, jid).started_at = utcnow() - timedelta(minutes=11)
+        s.commit()
+    loop.run_until_complete(step())
+    assert job().status == "needs_attention"
+    assert "non démarrée" in sent[-1]
+    loop.close()
