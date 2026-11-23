@@ -24,7 +24,7 @@ DEFAULTS: dict[str, Any] = {
     "import_octoprint": True,
     "import_watch_folder": True,
     "octoprint_api_key": None,  # generated on first read
-    # Spoolman base URL, e.g. http://192.168.0.6:7912 (empty: disabled)
+    # Spoolman base URL, e.g. http://homeassistant.local:7912 (empty: disabled)
     "spoolman_url": "",
     # Spool change reminders (the launch itself always asks for confirmation)
     "spool_reminder_finish": True,  # in the end-of-print notification

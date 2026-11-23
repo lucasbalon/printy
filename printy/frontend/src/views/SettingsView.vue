@@ -311,7 +311,7 @@ async function rotateKey() {
                 inputmode="url"
                 autocomplete="off"
                 spellcheck="false"
-                placeholder="http://192.168.0.6:7912"
+                placeholder="http://homeassistant.local:7912"
               />
               <button type="submit" class="btn btn--secondary" :disabled="testingSpoolman">
                 {{ testingSpoolman ? "Test…" : "Tester et enregistrer" }}

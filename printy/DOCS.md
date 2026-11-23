@@ -62,7 +62,7 @@ Les fichiers d'un même objet sont regroupés en un **modèle** d'après leur no
 ## Bobines (Spoolman)
 
 Dans **Réglages → Spoolman**, indique l'adresse de Spoolman (par exemple
-`http://192.168.0.6:7912` avec l'add-on Spoolman) puis **Tester et enregistrer**.
+`http://homeassistant.local:7912` avec l'add-on Spoolman) puis **Tester et enregistrer**.
 
 - **Bobine chargée** : sur la carte de chaque imprimante, choisis la bobine en place.
 - **À la planification**, Printy propose la bobine dont la couleur et la matière

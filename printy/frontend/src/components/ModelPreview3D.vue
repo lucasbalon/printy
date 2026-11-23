@@ -20,6 +20,16 @@ const heavy = computed(() => fullTriangles.value > HEAVY);
 let cleanup: (() => void) | null = null;
 let cached: { url: string; buffer: ArrayBuffer } | null = null;
 
+/** True when the file's normals look real (a sample of them is not all zero). */
+function hasUsableNormals(normals: Float32Array | undefined): boolean {
+  if (!normals || !normals.length) return false;
+  const step = Math.max(3, Math.floor(normals.length / 300 / 3) * 3);
+  for (let i = 0; i + 2 < normals.length; i += step) {
+    if (Math.abs(normals[i]) + Math.abs(normals[i + 1]) + Math.abs(normals[i + 2]) > 0.5) return true;
+  }
+  return false;
+}
+
 const fmt = (n: number) =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1).replace(".", ",")} M` : `${Math.round(n / 1000)} k`;
 
@@ -101,8 +111,8 @@ async function render() {
         g.computeVertexNormals();
         m.geometry.dispose();
         m.geometry = g;
-      } else if (!m.geometry.attributes.normal) {
-        m.geometry.computeVertexNormals();
+      } else if (!hasUsableNormals(m.geometry.attributes.normal?.array as Float32Array | undefined)) {
+        m.geometry.computeVertexNormals(); // some exporters write zero normals: the mesh would render black
       }
     }
     shownTriangles.value = meshes.reduce((n, m) => n + count(m), 0);
