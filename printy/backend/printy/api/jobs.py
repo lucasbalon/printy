@@ -126,6 +126,7 @@ class JobIn(BaseModel):
     note: str = ""
     spool_id: int | None = None
     auto_spool: bool = True  # pick the best matching spool when spool_id is empty
+    start_now: bool = False  # print right away; the user vouches for an empty bed
 
 
 @router.post("/jobs", status_code=201)
@@ -134,7 +135,7 @@ async def create_job(body: JobIn, s: DB):
     printer = s.get(Printer, body.printer_id)
     if f is None or printer is None:
         raise HTTPException(404, "Fichier ou imprimante introuvable.")
-    start = max(body.start_at.astimezone(UTC), utcnow())
+    start = utcnow() if body.start_now else max(body.start_at.astimezone(UTC), utcnow())
     duration = f.duration_s or 3600
     _check_slot(s, printer.id, start, duration)
     confirm = body.confirm_required
@@ -154,7 +155,11 @@ async def create_job(body: JobIn, s: DB):
         best = suggest(await spoolman.spools_or_empty(), f.color, f.material, printer.loaded_spool_id, f.filament_g)
         job.spool_id = best.id if best else None
     s.add(job)
-    add_event(job, "created", "Planifiée.")
+    if body.start_now:
+        job.confirmed_at = start
+        add_event(job, "created", "Lancement immédiat demandé, plateau vide confirmé.")
+    else:
+        add_event(job, "created", "Planifiée.")
     s.commit()
     scheduler.poke()
     return serialize.job(job, events=True)
@@ -255,13 +260,20 @@ def snooze_job(job_id: int, s: DB, minutes: int = 60):
 
 
 @router.post("/jobs/{job_id}/cancel")
-def cancel_job(job_id: int, s: DB):
+async def cancel_job(job_id: int, s: DB):
     job = _get(s, job_id)
+    sent = job.status in (JobStatus.STARTING, JobStatus.PRINTING, JobStatus.PAUSED) and job.started_at is not None
     try:
         sched.cancel(job)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     s.commit()
+    if sent and (driver := manager.driver(job.printer_id)):
+        # the file is on the printer: make sure it does not start later on its own
+        try:
+            await driver.cancel()
+        except Exception:  # noqa: BLE001
+            pass
     scheduler.poke()
     return serialize.job(job, events=True)
 
@@ -271,7 +283,7 @@ def delete_job(job_id: int, s: DB):
     job = s.get(Job, job_id)
     if job is None:
         return
-    if JobStatus(job.status) not in CLOSED_STATUSES | {JobStatus.SCHEDULED}:
+    if JobStatus(job.status) not in CLOSED_STATUSES | {JobStatus.SCHEDULED, JobStatus.NEEDS_ATTENTION}:
         raise HTTPException(409, "Annule d’abord cette impression.")
     s.delete(job)
     s.commit()

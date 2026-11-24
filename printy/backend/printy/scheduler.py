@@ -3,6 +3,9 @@
 scheduled → powering_on → awaiting_confirmation → ready → starting → printing
           → finished (then cooling and power off)
 
+"starting" lasts from the upload until the printer is really seen printing: a start
+command the printer ignores never shows up as a running print.
+
 Every transition is logged as a JobEvent. The loop runs every few seconds and can be
 woken early with `scheduler.poke()` after a change made from the API.
 """
@@ -36,6 +39,12 @@ TICK_S = 5
 OFFLINE_GRACE = timedelta(minutes=10)
 # After the start command, how long the printer may stay idle (heating, calibration)
 START_GRACE = timedelta(minutes=10)
+# … or report a busy state it does not name (long calibration on a K2)
+BUSY_GRACE = timedelta(minutes=30)
+# A printer that just came back online (plug switched on) is still booting: a K2 needs ~2 min
+BOOT_SETTLE_S = 120
+# Upload and start command together
+LAUNCH_TIMEOUT_S = 600
 SNAPSHOT_DIR = config.data_dir / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -56,9 +65,12 @@ class Scheduler:
         self._background: set[asyncio.Task[None]] = set()
         self._powered_by_us: set[int] = set()
         self._last_progress: dict[int, float] = {}
-        self._seen_running: set[int] = set()  # jobs the printer was seen working on
-        self._metered_at: dict[int, float] = {}
-        self.errors: dict[str, dict[str, str]] = {}  # last error per step, for the diagnostics  # job id -> last energy sample (monotonic)
+        self._launching: set[int] = set()  # jobs whose file is being sent right now
+        self._stopped: set[int] = set()  # jobs the user stopped from Printy: no start grace
+        self._offline: dict[int, bool] = {}  # printer id -> offline at the last tick
+        self._online_at: dict[int, float] = {}  # printer id -> back online since (monotonic)
+        self._metered_at: dict[int, float] = {}  # job id -> last energy sample (monotonic)
+        self.errors: dict[str, dict[str, str]] = {}  # last error per step, for the diagnostics
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -103,6 +115,7 @@ class Scheduler:
                 .options(joinedload(Job.printer), joinedload(Job.sliced_file))
                 .order_by(Job.start_at)
             ).unique().all()
+            self._track_boot(s)
             # each part is isolated: one failure must not stop the others
             for job in jobs:
                 await self._guard(s, f"impression {job.id}", self._step(s, job, opts))
@@ -123,7 +136,36 @@ class Scheduler:
                 log.exception("scheduler step %s failed", name)
             self.errors[name] = {"error": f"{exc.__class__.__name__} : {exc}", "at": utcnow().isoformat()}
 
+    def _track_boot(self, s: Session) -> None:
+        """Notes when a printer comes back online, to let it finish booting."""
+        for printer_id in s.scalars(select(Printer.id)):
+            offline = manager.status(printer_id).state == PrinterState.OFFLINE
+            if self._offline.get(printer_id) and not offline:
+                self._online_at[printer_id] = time.monotonic()
+            self._offline[printer_id] = offline
+
+    def booting(self, printer_id: int) -> bool:
+        at = self._online_at.get(printer_id)
+        return at is not None and time.monotonic() - at < BOOT_SETTLE_S
+
+    def launching(self, job_id: int) -> bool:
+        return job_id in self._launching
+
+    def stopped_by_user(self, job_id: int) -> None:
+        """The user stopped the print from Printy: an idle printer now means "cancelled"."""
+        self._stopped.add(job_id)
+        self.poke()
+
     async def _step(self, s: Session, job: Job, opts: dict) -> None:
+        # chain the immediate transitions (scheduled → powering on → ready → starting)
+        # instead of waiting for the next tick between each of them
+        for _ in range(4):
+            before = job.status
+            await self._advance(s, job, opts)
+            if job.status == before or job.status in (JobStatus.STARTING, JobStatus.NEEDS_ATTENTION):
+                return
+
+    async def _advance(self, s: Session, job: Job, opts: dict) -> None:
         now = utcnow()
         printer = job.printer
         status = manager.status(printer.id)
@@ -156,6 +198,10 @@ class Scheduler:
             if status.state in (PrinterState.PRINTING, PrinterState.PAUSED, PrinterState.BUSY):
                 job.message = "L’imprimante est occupée."
                 return
+            if self.booting(printer.id):
+                job.message = "L’imprimante termine son démarrage."
+                return
+            job.message = ""
             await self._ask_confirmation(job, opts)
             return
 
@@ -169,10 +215,16 @@ class Scheduler:
         if st == JobStatus.READY:
             if now >= job.start_at:
                 job.status = JobStatus.STARTING
+                job.started_at = None
                 add_event(job, "starting", "Envoi du fichier à l’imprimante.")
+                self._launching.add(job.id)
                 task = asyncio.create_task(self._launch(job.id))
                 self._background.add(task)
                 task.add_done_callback(self._background.discard)
+            return
+
+        if st == JobStatus.STARTING:
+            await self._follow_start(s, job, status, opts)
             return
 
         if st in (JobStatus.PRINTING, JobStatus.PAUSED):
@@ -261,6 +313,13 @@ class Scheduler:
     # -- launch and follow ----------------------------------------------------
 
     async def _launch(self, job_id: int) -> None:
+        try:
+            await self._send_file(job_id)
+        finally:
+            self._launching.discard(job_id)
+            self.poke()
+
+    async def _send_file(self, job_id: int) -> None:
         with SessionLocal() as s:
             job = s.get(Job, job_id)
             if job is None:
@@ -268,25 +327,75 @@ class Scheduler:
             driver = manager.driver(job.printer_id)
             path = config.library_dir / job.sliced_file.path
             name = remote_name(job)
-            try:
+            spool_id, printer_id = job.spool_id, job.printer_id
+
+            async def send() -> None:
                 if driver is None:
                     raise DriverError("Pilote d’imprimante indisponible.")
                 await driver.upload(path, name)
-                if job.spool_id is not None and await driver.set_active_spool(job.spool_id):
-                    manager.spool_pushed(job.printer_id)
+                if spool_id is not None and await driver.set_active_spool(spool_id):
+                    manager.spool_pushed(printer_id)
                 await driver.start(name)
-            except (DriverError, OSError) as exc:
-                job.status = JobStatus.NEEDS_ATTENTION
-                add_event(job, "error", f"Lancement impossible : {exc}")
-                s.commit()
+
+            try:
+                await asyncio.wait_for(send(), timeout=LAUNCH_TIMEOUT_S)
+            except Exception as exc:  # noqa: BLE001 - whatever happens, the job must not stay stuck
+                log.warning("launch of job %s failed: %s", job_id, exc)
+                reason = "l’imprimante ne répond pas" if isinstance(exc, TimeoutError) else (str(exc) or exc.__class__.__name__)
+                s.refresh(job)
+                if job.status == JobStatus.STARTING:
+                    job.status = JobStatus.NEEDS_ATTENTION
+                    add_event(job, "error", f"Lancement impossible : {reason}")
+                    s.commit()
                 return
-            job.status = JobStatus.PRINTING
+            s.refresh(job)
+            if job.status != JobStatus.STARTING:
+                return  # cancelled meanwhile
             job.started_at = utcnow()
             if job.spool_id is not None:
                 job.printer.loaded_spool_id = job.spool_id
-            add_event(job, "started", "Impression lancée.")
+            add_event(job, "sent", "Fichier envoyé, démarrage demandé à l’imprimante.")
             s.commit()
-        self.poke()
+
+    async def _follow_start(self, s: Session, job: Job, status, opts: dict) -> None:  # noqa: ANN001
+        """Between the start command and the first sign of a running print."""
+        if job.id in self._launching:
+            return
+        # the upload may have ended meanwhile, committed by its own session
+        s.refresh(job)
+        if job.status != JobStatus.STARTING:
+            return
+        if job.id in self._stopped and not status.active:
+            self._stopped.discard(job.id)
+            job.status = JobStatus.CANCELLED
+            job.finished_at = utcnow()
+            add_event(job, "cancelled", "Lancement arrêté depuis Printy.")
+            return
+        if job.started_at is None:
+            # the upload never finished (Printy restarted while sending)
+            job.status = JobStatus.NEEDS_ATTENTION
+            add_event(job, "attention", "L’envoi du fichier a été interrompu : relance l’impression.")
+            return
+        ours = bool(status.file) and status.file.rsplit("/", 1)[-1] == remote_name(job)
+        # a "finished" with our file name is this very print (a short one), not the previous one
+        if status.state in (PrinterState.PRINTING, PrinterState.PAUSED) or (ours and status.state == PrinterState.FINISHED):
+            job.status = JobStatus.PRINTING
+            add_event(job, "started", "Impression lancée.")
+            return
+        waited = utcnow() - job.started_at
+        if waited < (BUSY_GRACE if status.state == PrinterState.BUSY else START_GRACE):
+            job.message = "L’imprimante prépare l’impression (chauffe, calibrage)."
+            return
+        # never seen printing: the start command was ignored, nothing was printed
+        job.status = JobStatus.NEEDS_ATTENTION
+        job.started_at = None
+        add_event(job, "attention", "L’imprimante n’a pas démarré l’impression.")
+        await ha.notify(
+            opts["notify_targets"],
+            f"{job.printer.name} : impression non démarrée",
+            f"{job.sliced_file.model.name} a été envoyée mais l’imprimante ne l’a pas lancée.",
+            tag=f"printy-job-{job.id}",
+        )
 
     def _meter(self, job: Job, opts: dict) -> None:
         """Integrates the plug's power over the print (kWh per piece)."""
@@ -316,7 +425,6 @@ class Scheduler:
         running = status.state in (PrinterState.PRINTING, PrinterState.PAUSED)
         if running:
             # outside of a running print, the progress may be the previous print's 100 %
-            self._seen_running.add(job.id)
             if status.progress is not None:
                 self._last_progress[job.id] = status.progress
         if status.state == PrinterState.PAUSED and job.status != JobStatus.PAUSED:
@@ -326,31 +434,17 @@ class Scheduler:
             job.status = JobStatus.PRINTING
             add_event(job, "resumed", "Impression reprise.")
         elif status.state == PrinterState.ERROR:
-            self._seen_running.discard(job.id)
             job.status = JobStatus.FAILED
             job.finished_at = now
             self._record_usage(job, self._last_progress.pop(job.id, 0))
             add_event(job, "error", status.message or "L’imprimante signale une erreur.")
             await self._close_print(s, job, opts, success=False)
         elif status.state in (PrinterState.FINISHED, PrinterState.IDLE):
-            # A K2 goes through several states after the start (previous print's "finished",
-            # idle, heating, calibration): nothing is concluded during the first minutes.
-            if now - (job.started_at or now) < START_GRACE:
+            # The print was seen running; a K2 still flickers through several states
+            # after the start (idle, heating, calibration): nothing is concluded too early.
+            if now - (job.started_at or now) < START_GRACE and job.id not in self._stopped:
                 return
-            if job.id not in self._seen_running:
-                # never seen printing: the start command was ignored, nothing was printed
-                job.status = JobStatus.NEEDS_ATTENTION
-                job.started_at = None
-                add_event(job, "attention", "L’imprimante n’a pas démarré l’impression.")
-                self._metered_at.pop(job.id, None)
-                await ha.notify(
-                    opts["notify_targets"],
-                    f"{job.printer.name} : impression non démarrée",
-                    f"{job.sliced_file.model.name} a été envoyée mais l’imprimante ne l’a pas lancée.",
-                    tag=f"printy-job-{job.id}",
-                )
-                return
-            self._seen_running.discard(job.id)
+            self._stopped.discard(job.id)
             progress = self._last_progress.pop(job.id, 0)
             done = status.state == PrinterState.FINISHED or progress > 0.98
             job.finished_at = now
@@ -559,8 +653,16 @@ def snooze(job: Job, minutes: int = 60) -> None:
 
 
 def cancel(job: Job) -> None:
+    """Cancels in Printy. A print the printer is really running must be stopped on it first."""
+    if job.status in (JobStatus.FINISHED, JobStatus.FAILED, JobStatus.CANCELLED):
+        return
     if job.status in (JobStatus.PRINTING, JobStatus.PAUSED, JobStatus.STARTING):
-        raise ValueError("Impression en cours : annule-la depuis l’imprimante.")
+        if scheduler.launching(job.id):
+            raise ValueError("Envoi du fichier en cours : réessaie dans un instant.")
+        if manager.status(job.printer_id).active:
+            raise ValueError("L’imprimante imprime : arrête d’abord l’impression.")
+        if job.started_at is not None:
+            job.finished_at = utcnow()
     job.status = JobStatus.CANCELLED
     add_event(job, "cancelled", "Annulée.")
 

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..db import get_session, utcnow
 from ..drivers import DRIVERS, DriverError
 from ..ha import ha
-from ..models import Job, Printer
+from ..models import Job, JobStatus, Printer
 from ..printers import manager
 from ..scheduler import scheduler
 from . import serialize
@@ -132,6 +132,15 @@ async def printer_action(printer_id: int, body: ActionIn, s: DB):
         await getattr(driver, body.action)()
     except DriverError as exc:
         raise HTTPException(409, str(exc)) from exc
+    if body.action == "cancel":
+        running = s.scalars(
+            select(Job.id).where(
+                Job.printer_id == printer_id,
+                Job.status.in_([JobStatus.STARTING.value, JobStatus.PRINTING.value, JobStatus.PAUSED.value]),
+            )
+        ).all()
+        for job_id in running:
+            scheduler.stopped_by_user(job_id)
     scheduler.poke()
     p = s.get(Printer, printer_id)
     await manager.refresh(p)

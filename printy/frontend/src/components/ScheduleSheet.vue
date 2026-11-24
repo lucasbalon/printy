@@ -42,9 +42,11 @@ const error = ref("");
 const spoolId = ref<number | null>(null);
 const spoolTouched = ref(false);
 const ranked = ref<Spool[]>([]);
+// "now": the print leaves as soon as the printer is ready, no notification
+const now = ref(true);
 
-function roundedNow(): Date {
-  const d = new Date(Date.now() + 15 * 60_000);
+function inAnHour(): Date {
+  const d = new Date(Date.now() + 60 * 60_000);
   d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
   return d;
 }
@@ -76,7 +78,9 @@ watch(
     if (!state.printersLoaded) await attempt(loadPrinters);
     confirm.value = state.settings?.confirm_by_default ?? true;
     printerId.value = props.preset.printerId ?? state.printers[0]?.id ?? null;
-    setStart(props.preset.start && props.preset.start > new Date() ? props.preset.start : roundedNow());
+    const later = !!props.preset.start && props.preset.start.getTime() > Date.now() + 5 * 60_000;
+    now.value = !later;
+    setStart(later ? props.preset.start! : inAnHour());
     if (props.preset.modelId) await attempt(() => pickModel(props.preset.modelId!, props.preset.slicedId));
     models.value = (await attempt(() => api.get<ModelSummary[]>("/models"))) ?? [];
   },
@@ -92,16 +96,18 @@ const filtered = computed(() => {
 });
 
 const version = computed(() => model.value?.sliced.find((s) => s.id === slicedId.value) ?? null);
-const start = computed(() => (date.value && hour.value ? fromInputs(date.value, hour.value) : null));
+const start = computed(() => (now.value ? new Date() : date.value && hour.value ? fromInputs(date.value, hour.value) : null));
 const end = computed(() =>
   start.value ? new Date(start.value.getTime() + (version.value?.duration_s ?? 3600) * 1000) : null,
 );
 const offPeak = computed(() => state.settings?.off_peak ?? []);
 const share = computed(() => (start.value && end.value ? offPeakShare(start.value, end.value, offPeak.value) : 0));
-const inPast = computed(() => !!start.value && start.value.getTime() < Date.now() - 60_000);
+const inPast = computed(() => !now.value && !!start.value && start.value.getTime() < Date.now() - 60_000);
+const printer = computed(() => state.printers.find((p) => p.id === printerId.value) ?? null);
+const printerBusy = computed(() => ["printing", "paused"].includes(printer.value?.live?.state ?? ""));
 
 const quickStarts = computed(() => {
-  const out: { label: string; at: Date }[] = [{ label: "Dès que possible", at: roundedNow() }];
+  const out: { label: string; at: Date }[] = [];
   const hc = nextOffPeak(new Date(), offPeak.value);
   if (hc) out.push({ label: `Heures creuses, ${when(hc)}`, at: hc });
   const tomorrow = addDays(startOfDay(new Date()), 1);
@@ -141,6 +147,11 @@ const tooLittle = computed(
 
 const canSave = computed(() => !!slicedId.value && !!printerId.value && !!start.value && !saving.value);
 
+function pickLater(at?: Date) {
+  now.value = false;
+  if (at) setStart(at);
+}
+
 async function save() {
   if (!canSave.value || !start.value) return;
   saving.value = true;
@@ -149,7 +160,8 @@ async function save() {
     const job = await api.post<Job>("/jobs", {
       sliced_file_id: slicedId.value,
       printer_id: printerId.value,
-      start_at: start.value.toISOString(),
+      start_at: (now.value ? new Date() : start.value).toISOString(),
+      start_now: now.value,
       confirm_required: confirm.value,
       spool_id: spoolId.value,
       auto_spool: !state.spools.enabled,
@@ -169,7 +181,7 @@ function versionLabel(v: ModelFull["sliced"][number]): string {
 </script>
 
 <template>
-  <AppSheet :open="open" title="Planifier une impression" @close="emit('close')">
+  <AppSheet :open="open" :title="now ? 'Imprimer' : 'Planifier une impression'" @close="emit('close')">
     <form id="schedule-form" class="form-grid" @submit.prevent="save">
       <!-- What -->
       <fieldset class="step">
@@ -278,21 +290,31 @@ function versionLabel(v: ModelFull["sliced"][number]): string {
       <!-- When -->
       <fieldset class="step">
         <legend>Quand</legend>
-        <div class="quick">
-          <button v-for="q in quickStarts" :key="q.label" type="button" class="tag" @click="setStart(q.at)">
-            {{ q.label }}
-          </button>
+        <div class="segmented" role="group" aria-label="Quand">
+          <button type="button" :aria-pressed="now" @click="now = true">Maintenant</button>
+          <button type="button" :aria-pressed="!now" @click="pickLater()">Plus tard</button>
         </div>
-        <div class="form-row">
-          <div class="field">
-            <label for="sched-date">Jour</label>
-            <input id="sched-date" v-model="date" class="input" type="date" required />
+        <template v-if="!now">
+          <div v-if="quickStarts.length" class="quick">
+            <button v-for="q in quickStarts" :key="q.label" type="button" class="tag" @click="pickLater(q.at)">
+              {{ q.label }}
+            </button>
           </div>
-          <div class="field">
-            <label for="sched-time">Heure de début</label>
-            <input id="sched-time" v-model="hour" class="input" type="time" step="900" required />
+          <div class="form-row">
+            <div class="field">
+              <label for="sched-date">Jour</label>
+              <input id="sched-date" v-model="date" class="input" type="date" required />
+            </div>
+            <div class="field">
+              <label for="sched-time">Heure de début</label>
+              <input id="sched-time" v-model="hour" class="input" type="time" step="60" required />
+            </div>
           </div>
-        </div>
+        </template>
+        <p v-else-if="printerBusy" class="notice">
+          <AlertTriangle aria-hidden="true" />
+          <span>{{ printer?.name }} imprime déjà : choisis « Plus tard » ou une autre imprimante.</span>
+        </p>
         <dl v-if="start && end" class="summary">
           <div>
             <dt>Fin prévue</dt>
@@ -309,7 +331,15 @@ function versionLabel(v: ModelFull["sliced"][number]): string {
       </fieldset>
 
       <!-- Safety -->
-      <fieldset class="step">
+      <fieldset v-if="now" class="step">
+        <legend class="visually-hidden">Plateau</legend>
+        <p v-if="printer?.piece_on_bed" class="notice notice--error">
+          <AlertTriangle aria-hidden="true" />
+          <span>La dernière pièce n’a pas été déclarée retirée : vérifie que le plateau de {{ printer.name }} est vide.</span>
+        </p>
+        <p v-else class="muted small">En lançant maintenant, tu confirmes que le plateau est vide.</p>
+      </fieldset>
+      <fieldset v-else class="step">
         <legend class="visually-hidden">Confirmation</legend>
         <label class="switch">
           <input v-model="confirm" type="checkbox" />
@@ -334,7 +364,7 @@ function versionLabel(v: ModelFull["sliced"][number]): string {
     <template #foot>
       <button type="button" class="btn btn--ghost" @click="emit('close')">Annuler</button>
       <button type="submit" form="schedule-form" class="btn btn--primary" :disabled="!canSave" :aria-busy="saving">
-        {{ saving ? "Planification…" : "Planifier" }}
+        {{ now ? (saving ? "Lancement…" : "Lancer maintenant") : saving ? "Planification…" : "Planifier" }}
       </button>
     </template>
   </AppSheet>

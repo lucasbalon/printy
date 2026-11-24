@@ -75,6 +75,11 @@ const needsUser = computed(() => job.value?.status === "awaiting_confirmation" |
 const movable = computed(() => !!job.value && MOVABLE.includes(job.value.status));
 const closed = computed(() => !!job.value && CLOSED.includes(job.value.status));
 const running = computed(() => job.value?.status === "printing" || job.value?.status === "paused");
+// what the printer itself reports: a job stuck in Printy can always be cancelled when nothing runs
+const printerActive = computed(() => ["printing", "paused"].includes(printer.value?.live?.state ?? ""));
+const cancellable = computed(
+  () => !!job.value && !closed.value && (!(running.value || job.value.status === "starting") || !printerActive.value),
+);
 const photoUrl = computed(() => {
   void photoKey.value;
   if (!job.value) return "";
@@ -266,7 +271,7 @@ async function markDefect() {
           </div>
           <div class="field">
             <label for="job-time">Début</label>
-            <input id="job-time" v-model="hour" class="input" type="time" step="900" />
+            <input id="job-time" v-model="hour" class="input" type="time" step="60" />
           </div>
         </div>
         <div class="row">
@@ -321,11 +326,11 @@ async function markDefect() {
     </div>
 
     <template v-if="job" #foot>
-      <button v-if="closed || job.status === 'scheduled'" type="button" class="btn btn--ghost" :disabled="busy" @click="remove">
+      <button v-if="closed || job.status === 'scheduled' || job.status === 'needs_attention'" type="button" class="btn btn--ghost" :disabled="busy" @click="remove">
         Retirer du planning
       </button>
-      <button v-if="!closed && !running && job.status !== 'starting'" type="button" class="btn btn--danger" :disabled="busy" @click="cancelJob">
-        Annuler l’impression
+      <button v-if="cancellable" type="button" class="btn btn--danger" :disabled="busy" @click="cancelJob">
+        {{ job.status === "starting" ? "Annuler le lancement" : "Annuler l’impression" }}
       </button>
       <button type="button" class="btn btn--secondary" @click="emit('close')">Fermer</button>
     </template>

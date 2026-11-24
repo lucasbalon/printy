@@ -206,7 +206,8 @@ function openSchedule(p: SchedulePreset = {}) {
 }
 function onCreated(job: Job) {
   scheduleOpen.value = false;
-  toast(`« ${job.model_name} » planifiée ${when(job.start_at)}.`, "info", {
+  const soon = new Date(job.start_at).getTime() < Date.now() + 2 * 60_000;
+  toast(soon ? `« ${job.model_name} » part à l’impression.` : `« ${job.model_name} » planifiée ${when(job.start_at)}.`, "info", {
     label: "Voir",
     run: () => (jobId.value = job.id),
   });
