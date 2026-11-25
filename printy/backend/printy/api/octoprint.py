@@ -44,5 +44,10 @@ def upload(s: DB, file: UploadFile = File(...), x_api_key: Annotated[str | None,
     return {
         "done": True,
         "files": {"local": {"name": file.filename, "origin": "local"}},
-        "printy": {"model_id": r.model.id, "model_name": r.model.name, "duplicate": r.duplicate},
+        "printy": {
+            "model_id": r.model.id if r.model else None,
+            "model_name": r.model.name if r.model else None,
+            "to_file": r.kind == "pending",  # name matches no model: waits in the library
+            "duplicate": r.duplicate,
+        },
     }

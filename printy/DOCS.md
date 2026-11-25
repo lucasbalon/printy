@@ -114,6 +114,20 @@ Formats : fichiers tranchés `.gcode` et `.gcode.3mf` ; sources `.stl`, `.3mf`, 
 Les fichiers d'un même objet sont regroupés en un **modèle** d'après leur nom
 (`lampe_vague_K2_PLA.gcode` et `lampe_vague_X1C_PLA.gcode` → « Lampe vague »).
 
+- **À trier** : un fichier dont le nom ne correspond à aucun modèle ne crée rien tout
+  seul. Il attend en haut de la Bibliothèque (un compteur s'affiche sur l'onglet) :
+  **Nouveau modèle** (nom modifiable) ou **Modèle existant**, ou **Ignorer**.
+- **Nouvelle version** : un gcode pour la même imprimante et la même matière qu'une
+  version existante est proposé en remplacement (« Nouvelle version à valider »).
+  **Remplacer l'ancienne** l'archive avec son historique et ses kWh, fait passer les
+  impressions prévues sur le nouveau fichier et reprend le nombre de pièces par
+  impression ; **Garder les deux** les laisse côte à côte. Pour ranger un fichier à
+  trier dans un modèle existant, une case propose le même remplacement.
+- Sur la fiche du modèle, une version s'**archive** (plus proposée à la planification,
+  historique gardé) ; les **Versions précédentes** se restaurent ou se suppriment
+  définitivement. Le stock appartient au modèle : il ne bouge pas quand les fichiers
+  changent.
+
 ## Bobines (Spoolman)
 
 Dans **Réglages → Spoolman**, indique l'adresse de Spoolman (par exemple

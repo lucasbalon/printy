@@ -18,6 +18,7 @@ from printy.models import Job, Printer
 from printy.printers import manager
 from printy.scheduler import scheduler
 
+from .conftest import upload_new
 from .test_gcode import ORCA
 
 TZ = config.timezone
@@ -27,7 +28,7 @@ def _setup(client, name):
     pid = client.post("/api/v1/printers", json={
         "name": name, "driver": "demo", "options": {"speed": 1}, "camera_source": "none",
     }).json()["id"]
-    r = client.post("/api/v1/upload", files=[("files", (f"{name}.gcode", io.BytesIO(ORCA.encode() + f"; {name}\n".encode())))])
+    r = upload_new(client, files=[("files", (f"{name}.gcode", io.BytesIO(ORCA.encode() + f"; {name}\n".encode())))])
     sliced_id = client.get(f"/api/v1/models/{r.json()['imported'][0]['model_id']}").json()["sliced"][0]["id"]
     return pid, sliced_id
 

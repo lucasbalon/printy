@@ -166,7 +166,7 @@ def _candidates(s: Session, tag: str, spool: Spool) -> list[Candidate]:
         ]
         stock = sum(i.quantity for i in same)
         versions = [
-            v for v in m.sliced
+            v for v in m.active_sliced
             if v.filament_g and (not v.material or not spool.material or v.material.lower() == spool.material.lower())
         ]
         for v in versions:

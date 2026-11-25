@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import object_session
 
 from ..drivers import DRIVERS
-from ..models import Job, JobStatus, Model, Printer, SlicedFile, SourceFile
+from ..models import Job, JobStatus, Model, PendingFile, Printer, SlicedFile, SourceFile
 from ..printers import manager
 
 
@@ -42,6 +42,21 @@ def sliced(f: SlicedFile) -> dict[str, Any]:
         "nozzle": f.nozzle,
         "pieces": f.pieces or 1,
         "created_at": f.created_at.isoformat(),
+        "archived_at": f.archived_at.isoformat() if f.archived_at else None,
+        "replaces_id": f.replaces_id,  # may replace this older version: the user decides
+    }
+
+
+def pending(p: PendingFile) -> dict[str, Any]:
+    return {
+        "id": p.id,
+        "filename": p.filename,
+        "size": p.size,
+        "kind": p.kind,
+        "suggested_name": p.suggested_name,
+        "has_thumbnail": bool(p.thumbnail),
+        **(p.meta or {}),
+        "created_at": p.created_at.isoformat(),
     }
 
 
@@ -50,24 +65,28 @@ def source(f: SourceFile) -> dict[str, Any]:
 
 
 def model(m: Model, *, full: bool = False) -> dict[str, Any]:
-    cover = next((f for f in m.sliced if f.thumbnail), None)
+    active = m.active_sliced
+    cover = next((f for f in reversed(active) if f.thumbnail), None)  # the newest picture
     data: dict[str, Any] = {
         "id": m.id,
         "name": m.name,
         "description": m.description,
         "tags": m.tags or [],
         "cover_id": cover.id if cover else None,
-        "sliced_count": len(m.sliced),
+        "sliced_count": len(active),
         "source_count": len(m.sources),
-        "duration_s": min((f.duration_s for f in m.sliced if f.duration_s), default=None),
-        "filament_g": min((f.filament_g for f in m.sliced if f.filament_g), default=None),
-        "colors": sorted({f.color for f in m.sliced if f.color}),
+        "duration_s": min((f.duration_s for f in active if f.duration_s), default=None),
+        "filament_g": min((f.filament_g for f in active if f.filament_g), default=None),
+        "colors": sorted({f.color for f in active if f.color}),
         "stock_alert": m.stock_alert,
-        "materials": sorted({f.material for f in m.sliced if f.material}),
+        "materials": sorted({f.material for f in active if f.material}),
+        # a new file may replace an older version: shown until the user decides
+        "version_offer": any(f.replaces_id for f in active),
         "updated_at": m.updated_at.isoformat(),
     }
     if full:
-        data["sliced"] = [sliced(f) for f in m.sliced]
+        data["sliced"] = [sliced(f) for f in active]
+        data["archived"] = [sliced(f) for f in reversed(m.sliced) if f.archived_at is not None]
         data["sources"] = [source(f) for f in m.sources]
     return data
 

@@ -34,7 +34,7 @@ def list_stock(s: DB):
     """Products: every model with something printable or something in stock."""
     in_stock = set(s.scalars(select(StockItem.model_id)))
     models = s.scalars(select(Model).options(selectinload(Model.sliced), selectinload(Model.sources))).all()
-    out = [product(s, m) for m in models if m.sliced or m.id in in_stock]
+    out = [product(s, m) for m in models if m.active_sliced or m.id in in_stock]
     out.sort(key=lambda p: (not p["stock_low"], p["stock_total"] == 0, p["name"].lower()))
     return out
 

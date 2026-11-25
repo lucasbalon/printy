@@ -14,6 +14,7 @@ from printy.models import Job
 from printy.printers import manager
 from printy.scheduler import scheduler
 
+from .conftest import upload_new
 from .test_gcode import ORCA
 
 
@@ -31,7 +32,7 @@ def test_full_cycle(monkeypatch):
     monkeypatch.setattr(ha, "notify", fake_notify)
     client = TestClient(app)  # no lifespan: we drive the scheduler by hand
 
-    r = client.post("/api/v1/upload", files=[("files", ("vague_base_K2_PLA.gcode", io.BytesIO(ORCA.encode())))])
+    r = upload_new(client, files=[("files", ("vague_base_K2_PLA.gcode", io.BytesIO(ORCA.encode())))])
     assert r.status_code == 200, r.text
     imported = r.json()["imported"][0]
     assert imported["model_name"] == "Vague base"
@@ -131,8 +132,10 @@ def test_chunked_upload():
         )
         assert r.status_code == 200, r.text
     body = r.json()
-    assert body["imported"][0]["kind"] == "source"
-    model = client.get(f"/api/v1/models/{body['imported'][0]['model_id']}").json()
+    assert body["imported"][0]["kind"] == "pending"  # a new name: waits to be filed
+    filed = client.post(f"/api/v1/pending/{body['imported'][0]['pending_id']}/file", json={}).json()
+    assert filed["kind"] == "source" and filed["model_name"] == "Lampe test"
+    model = client.get(f"/api/v1/models/{filed['model_id']}").json()
     assert model["sources"][0]["size"] == len(data)
     # a chunk out of sequence is refused
     r = client.post(f"/api/v1/upload/chunk?upload_id={'b' * 32}&index=1&total=2&filename=x.stl", content=b"x")
@@ -146,7 +149,7 @@ def test_print_started_outside_printy():
     pid = client.post("/api/v1/printers", json={
         "name": "Externe", "driver": "demo", "options": {"speed": 1}, "camera_source": "none",
     }).json()["id"]
-    r = client.post("/api/v1/upload", files=[("files", ("externe.gcode", io.BytesIO(ORCA.encode() + b"; ext\n")))])
+    r = upload_new(client, files=[("files", ("externe.gcode", io.BytesIO(ORCA.encode() + b"; ext\n")))])
     sliced_id = client.get(f"/api/v1/models/{r.json()['imported'][0]['model_id']}").json()["sliced"][0]["id"]
 
     loop = asyncio.new_event_loop()
@@ -185,7 +188,7 @@ def test_ignored_start_is_not_taken_for_a_cancel(monkeypatch):
     pid = client.post("/api/v1/printers", json={
         "name": "Muette", "driver": "demo", "options": {"speed": 1}, "camera_source": "none",
     }).json()["id"]
-    r = client.post("/api/v1/upload", files=[("files", ("muette.gcode", io.BytesIO(ORCA.encode() + b"; mute\n")))])
+    r = upload_new(client, files=[("files", ("muette.gcode", io.BytesIO(ORCA.encode() + b"; mute\n")))])
     sliced_id = client.get(f"/api/v1/models/{r.json()['imported'][0]['model_id']}").json()["sliced"][0]["id"]
     jid = client.post("/api/v1/jobs", json={
         "sliced_file_id": sliced_id, "printer_id": pid, "start_at": utcnow().isoformat(), "confirm_required": False,
@@ -238,7 +241,7 @@ def _setup(client, name):
     pid = client.post("/api/v1/printers", json={
         "name": name, "driver": "demo", "options": {"speed": 1}, "camera_source": "none",
     }).json()["id"]
-    r = client.post("/api/v1/upload", files=[("files", (f"{name}.gcode", io.BytesIO(ORCA.encode() + f"; {name}\n".encode())))])
+    r = upload_new(client, files=[("files", (f"{name}.gcode", io.BytesIO(ORCA.encode() + f"; {name}\n".encode())))])
     sliced_id = client.get(f"/api/v1/models/{r.json()['imported'][0]['model_id']}").json()["sliced"][0]["id"]
     return pid, sliced_id
 

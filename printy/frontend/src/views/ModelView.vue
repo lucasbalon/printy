@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, Box, CalendarPlus, Download, Plus, Trash2, X } from "lucide-vue-next";
+import { Archive, ArrowLeft, Box, CalendarPlus, Download, Plus, Trash2, X } from "lucide-vue-next";
 import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, urls } from "../api";
@@ -121,8 +121,22 @@ async function onFiles(e: Event) {
   input.value = "";
 }
 
+// versions: a newer file replaces an older one, which is archived with its history
+const offers = computed(() =>
+  (model.value?.sliced ?? [])
+    .filter((s) => s.replaces_id)
+    .map((s) => ({ file: s, old: model.value!.sliced.find((o) => o.id === s.replaces_id) ?? null })),
+);
+async function versionAction(id: number, action: "replace" | "keep-both" | "archive" | "restore", message: string) {
+  const res = await attempt(() => api.post<ModelFull>(`/sliced/${id}/${action}`), message);
+  if (res) model.value = res;
+}
+async function archiveSliced(id: number, filename: string) {
+  if (!window.confirm(`Archiver « ${filename} » ? Il ne sera plus proposé à la planification ; son historique est gardé.`)) return;
+  await versionAction(id, "archive", "Version archivée.");
+}
 async function deleteSliced(id: number, filename: string) {
-  if (!window.confirm(`Supprimer « ${filename} » ?`)) return;
+  if (!window.confirm(`Supprimer définitivement « ${filename} » ? L’historique de ses impressions (et leurs kWh) sera effacé.`)) return;
   if ((await attempt(() => api.del(`/sliced/${id}`))) !== undefined) {
     toast("Fichier supprimé.");
     load();
@@ -266,6 +280,21 @@ function schedule(slicedId?: number) {
           <h2>Fichiers tranchés</h2>
           <span class="muted small">Un fichier par imprimante ou réglage</span>
         </div>
+        <div v-for="o in offers" :key="o.file.id" class="notice offer">
+          <span>
+            <strong>{{ o.file.filename }}</strong> est une nouvelle version de <strong>{{ o.old?.filename ?? "l’ancien fichier" }}</strong>
+            (même imprimante, même matière). En la remplaçant, l’ancienne est archivée avec son historique et les impressions prévues
+            passent sur la nouvelle.
+          </span>
+          <span class="offer__actions">
+            <button type="button" class="btn btn--primary btn--sm" @click="versionAction(o.file.id, 'replace', 'Version remplacée.')">
+              Remplacer l’ancienne
+            </button>
+            <button type="button" class="btn btn--ghost btn--sm" @click="versionAction(o.file.id, 'keep-both', 'Les deux versions sont gardées.')">
+              Garder les deux
+            </button>
+          </span>
+        </div>
         <p v-if="!model.sliced.length" class="muted">Aucun fichier tranché. Ajoute un .gcode pour pouvoir planifier ce modèle.</p>
         <div v-else class="table-wrap">
           <table class="spec">
@@ -315,14 +344,41 @@ function schedule(slicedId?: number) {
                   <a :href="urls.downloadSliced(s.id)" class="btn btn--ghost btn--sm btn--icon" :aria-label="`Télécharger ${s.filename}`" @click.stop>
                     <Download aria-hidden="true" />
                   </a>
-                  <button type="button" class="btn btn--ghost btn--sm btn--icon" :aria-label="`Supprimer ${s.filename}`" @click.stop="deleteSliced(s.id, s.filename)">
-                    <Trash2 aria-hidden="true" />
+                  <button
+                    type="button"
+                    class="btn btn--ghost btn--sm btn--icon"
+                    :aria-label="`Archiver ${s.filename}`"
+                    title="Archiver (garde l’historique)"
+                    @click.stop="archiveSliced(s.id, s.filename)"
+                  >
+                    <Archive aria-hidden="true" />
                   </button>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
+        <details v-if="model.archived.length" class="more archived">
+          <summary>Versions précédentes ({{ model.archived.length }})</summary>
+          <ul class="archived__list" role="list">
+            <li v-for="a in model.archived" :key="a.id" class="archived__row">
+              <span class="filename">{{ a.filename }}</span>
+              <span class="small muted">
+                {{ a.printer_model ?? "" }} {{ a.material ?? "" }}, <span class="mono">{{ duration(a.duration_s) }}</span>,
+                archivée le {{ new Date(a.archived_at!).toLocaleDateString("fr-FR") }}
+              </span>
+              <span class="archived__actions">
+                <button type="button" class="btn btn--ghost btn--sm" @click="versionAction(a.id, 'restore', 'Version restaurée.')">Restaurer</button>
+                <a :href="urls.downloadSliced(a.id)" class="btn btn--ghost btn--sm btn--icon" :aria-label="`Télécharger ${a.filename}`">
+                  <Download aria-hidden="true" />
+                </a>
+                <button type="button" class="btn btn--ghost btn--sm btn--icon" :aria-label="`Supprimer définitivement ${a.filename}`" @click="deleteSliced(a.id, a.filename)">
+                  <Trash2 aria-hidden="true" />
+                </button>
+              </span>
+            </li>
+          </ul>
+        </details>
       </section>
 
       <section class="section">
@@ -483,4 +539,11 @@ function schedule(slicedId?: number) {
   .spec td:first-child { grid-column: 1; }
   .spec td.actions { grid-row: 1; grid-column: 2; }
 }
+.offer { display: grid; gap: var(--space-sm); margin-bottom: var(--space-md); }
+.offer__actions { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
+.archived { margin-top: var(--space-md); }
+.archived__list { display: grid; margin: var(--space-xs) 0 0; padding: 0; list-style: none; }
+.archived__row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3xs) var(--space-sm); align-items: center; padding: var(--space-xs) 0; border-bottom: var(--rule-hair) solid var(--color-rule); }
+.archived__row .small { grid-column: 1; }
+.archived__actions { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: var(--space-3xs); }
 </style>

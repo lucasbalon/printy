@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from .. import library
 from ..config import config
-from ..db import get_session
-from ..models import OPEN_STATUSES, Job, Model, SlicedFile, SourceFile
+from ..db import get_session, utcnow
+from ..models import OPEN_STATUSES, Job, Model, PendingFile, SlicedFile, SourceFile
 from . import serialize
 
 router = APIRouter(tags=["library"])
@@ -115,16 +115,24 @@ def delete_model(model_id: int, s: DB):
     library.delete_model_dir(model_id)
 
 
+def _result(filename: str | None, r: library.ImportResult) -> dict:
+    return {
+        "filename": filename,
+        "model_id": r.model.id if r.model else None,
+        "model_name": r.model.name if r.model else None,
+        "kind": r.kind,  # sliced | source | pending (waits to be filed)
+        "duplicate": r.duplicate,
+        "pending_id": r.pending.id if r.pending else None,
+    }
+
+
 @router.post("/upload")
 def upload(s: DB, files: list[UploadFile] = File(...), model_id: int | None = Form(None)):
     results, errors = [], []
     for f in files:
         try:
             r = library.import_stream(s, f.file, f.filename or "fichier", model_id=model_id)
-            results.append(
-                {"filename": f.filename, "model_id": r.model.id, "model_name": r.model.name,
-                 "kind": r.kind, "duplicate": r.duplicate}
-            )
+            results.append(_result(f.filename, r))
         except (library.UnsupportedFile, LookupError) as exc:
             s.rollback()
             errors.append({"filename": f.filename, "error": str(exc)})
@@ -171,13 +179,7 @@ async def upload_chunk(
         return {"imported": [], "errors": [{"filename": filename, "error": str(exc)}]}
     finally:
         part.unlink(missing_ok=True)
-    return {
-        "imported": [
-            {"filename": filename, "model_id": r.model.id, "model_name": r.model.name,
-             "kind": r.kind, "duplicate": r.duplicate}
-        ],
-        "errors": [],
-    }
+    return {"imported": [_result(filename, r)], "errors": []}
 
 
 @router.delete("/sliced/{file_id}", status_code=204)
@@ -188,6 +190,8 @@ def delete_sliced(file_id: int, s: DB):
     if _has_open_jobs(s, [f.id]):
         raise HTTPException(409, "Ce fichier est utilisé par une impression planifiée.")
     _drop_closed_jobs(s, [f.id])
+    for other in s.scalars(select(SlicedFile).where(SlicedFile.replaces_id == f.id)):
+        other.replaces_id = None
     library.delete_file(f.path)
     if f.thumbnail:
         library.delete_file(f.thumbnail)
@@ -203,6 +207,96 @@ def delete_source(file_id: int, s: DB):
     library.delete_file(f.path)
     s.delete(f)
     s.commit()
+
+
+# -- files waiting to be filed ------------------------------------------------------
+
+
+@router.get("/pending")
+def list_pending(s: DB):
+    return [serialize.pending(p) for p in s.scalars(select(PendingFile).order_by(PendingFile.created_at))]
+
+
+@router.get("/pending/{pending_id}/thumbnail")
+def pending_thumbnail(pending_id: int, s: DB):
+    p = s.get(PendingFile, pending_id)
+    if p is None or not p.thumbnail:
+        raise HTTPException(404)
+    return FileResponse(config.library_dir / p.thumbnail)
+
+
+class FileIn(BaseModel):
+    model_id: int | None = None  # an existing model…
+    new_name: str | None = Field(None, max_length=200)  # … or a new one
+    replace: bool = False  # replace the version for the same printer and material
+
+
+@router.post("/pending/{pending_id}/file")
+def file_pending(pending_id: int, body: FileIn, s: DB):
+    p = s.get(PendingFile, pending_id)
+    if p is None:
+        raise HTTPException(404, "Fichier introuvable : il a peut-être déjà été rangé.")
+    try:
+        r = library.file_pending(s, p, model_id=body.model_id, new_name=body.new_name, replace=body.replace)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return _result(p.filename, r)
+
+
+@router.delete("/pending/{pending_id}", status_code=204)
+def discard_pending(pending_id: int, s: DB):
+    p = s.get(PendingFile, pending_id)
+    if p is not None:
+        library.discard_pending(s, p)
+
+
+# -- versions ---------------------------------------------------------------------
+
+
+def _sliced(s: Session, file_id: int) -> SlicedFile:
+    f = s.get(SlicedFile, file_id)
+    if f is None:
+        raise HTTPException(404, "Fichier introuvable.")
+    return f
+
+
+@router.post("/sliced/{file_id}/replace")
+def replace_version(file_id: int, s: DB):
+    """The new version replaces the older one for the same printer and material."""
+    f = _sliced(s, file_id)
+    if f.replaces_id is None:
+        raise HTTPException(409, "Aucune version à remplacer.")
+    library.replace_version(s, f)
+    s.commit()
+    return serialize.model(f.model, full=True)
+
+
+@router.post("/sliced/{file_id}/keep-both")
+def keep_both(file_id: int, s: DB):
+    f = _sliced(s, file_id)
+    f.replaces_id = None
+    s.commit()
+    return serialize.model(f.model, full=True)
+
+
+@router.post("/sliced/{file_id}/archive")
+def archive_version(file_id: int, s: DB):
+    """Hides a version from planning, keeping its history."""
+    f = _sliced(s, file_id)
+    if _has_open_jobs(s, [f.id]):
+        raise HTTPException(409, "Ce fichier est utilisé par une impression planifiée.")
+    f.archived_at = utcnow()
+    f.replaces_id = None
+    s.commit()
+    return serialize.model(f.model, full=True)
+
+
+@router.post("/sliced/{file_id}/restore")
+def restore_version(file_id: int, s: DB):
+    f = _sliced(s, file_id)
+    f.archived_at = None
+    s.commit()
+    return serialize.model(f.model, full=True)
 
 
 @router.get("/sliced/{file_id}/thumbnail")

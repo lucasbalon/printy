@@ -14,6 +14,24 @@ export interface SlicedFile {
   nozzle: number | null;
   pieces: number;
   created_at: string;
+  archived_at: string | null; // replaced by a newer version, kept for its history
+  replaces_id: number | null; // may replace this older version: the user decides
+}
+
+export interface PendingFile {
+  id: number;
+  filename: string;
+  size: number;
+  kind: "sliced" | "source";
+  suggested_name: string;
+  has_thumbnail: boolean;
+  printer_model?: string | null;
+  duration_s?: number | null;
+  filament_g?: number | null;
+  material?: string | null;
+  color?: string | null;
+  layer_height?: number | null;
+  created_at: string;
 }
 
 export interface SourceFile {
@@ -37,6 +55,7 @@ export interface ModelSummary {
   materials: string[];
   updated_at: string;
   stock_alert: number | null;
+  version_offer: boolean; // a new file may replace an older version
 }
 
 export interface JobPreview {
@@ -80,6 +99,7 @@ export interface StockMove {
 
 export interface ModelFull extends ModelSummary {
   sliced: SlicedFile[];
+  archived: SlicedFile[];
   sources: SourceFile[];
 }
 

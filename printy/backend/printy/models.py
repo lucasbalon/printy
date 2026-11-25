@@ -31,6 +31,11 @@ class Model(Base):
         back_populates="model", cascade="all, delete-orphan", order_by="SourceFile.created_at"
     )
 
+    @property
+    def active_sliced(self) -> list[SlicedFile]:
+        """Versions offered for printing (replaced ones are kept for their history)."""
+        return [f for f in self.sliced if f.archived_at is None]
+
 
 class SlicedFile(Base):
     """A ready-to-print file for one printer / profile."""
@@ -55,8 +60,30 @@ class SlicedFile(Base):
     label: Mapped[str] = mapped_column(String(120), default="")
     pieces: Mapped[int] = mapped_column(Integer, default=1, server_default="1")  # pieces per print
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # replaced by a newer version: hidden from planning, kept with its print history
+    archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # a newer file for the same printer and material arrived: may replace this version
+    # (id of the older version, until the user decides)
+    replaces_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     model: Mapped[Model] = relationship(back_populates="sliced")
+
+
+class PendingFile(Base):
+    """An imported file whose name matches no model: waits for the user to file it."""
+
+    __tablename__ = "pending_files"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    path: Mapped[str] = mapped_column(String(500))  # relative to library dir
+    size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(10))  # sliced | source
+    suggested_name: Mapped[str] = mapped_column(String(200))
+    meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # duration, filament, material...
+    thumbnail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class SourceFile(Base):

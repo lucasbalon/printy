@@ -4,6 +4,7 @@ import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../api";
 import ModelThumb from "../components/ModelThumb.vue";
+import PendingFiles from "../components/PendingFiles.vue";
 import { duration, grams } from "../format";
 import { libraryVersion, uploadFiles, uploading, uploadProgress } from "../store";
 import type { ModelSummary } from "../types";
@@ -52,7 +53,8 @@ async function onFiles(e: Event) {
   const input = e.target as HTMLInputElement;
   const res = await uploadFiles(Array.from(input.files ?? []));
   input.value = "";
-  if (res?.imported.length === 1) router.push(`/bibliotheque/${res.imported[0].model_id}`);
+  const only = res?.imported.length === 1 ? res.imported[0] : null;
+  if (only?.model_id) router.push(`/bibliotheque/${only.model_id}`);
 }
 
 const filtering = computed(() => !!route.query.q || !!tag.value);
@@ -87,6 +89,8 @@ const filtering = computed(() => !!route.query.q || !!tag.value);
         </button>
       </div>
     </header>
+
+    <PendingFiles :models="models ?? []" @filed="(id) => router.push(`/bibliotheque/${id}`)" />
 
     <div v-if="tags.length" class="tags" role="group" aria-label="Filtrer par étiquette">
       <button
@@ -142,6 +146,7 @@ const filtering = computed(() => !!route.query.q || !!tag.value);
               <span v-if="m.filament_g" class="mono">{{ grams(m.filament_g) }}</span>
               <span v-for="c in m.colors.slice(0, 4)" :key="c" class="swatch" :style="{ background: c }" />
             </p>
+            <p v-if="m.version_offer" class="small offer">Nouvelle version à valider</p>
             <p v-if="m.sliced_count === 0" class="small muted">Source seule, pas encore tranché</p>
             <p v-else-if="m.sliced_count > 1" class="small muted">{{ m.sliced_count }} versions</p>
           </div>
@@ -172,6 +177,7 @@ const filtering = computed(() => !!route.query.q || !!tag.value);
 .tile__name { font-family: var(--font-body); font-weight: 500; font-size: var(--text-md); letter-spacing: 0; line-height: 1.3; }
 .tile__meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2xs) var(--space-sm); font-size: var(--text-sm); color: var(--color-ink-2); }
 
+.offer { color: var(--color-accent-strong); font-weight: 500; }
 .ways { display: grid; gap: var(--space-xs); margin: 0; padding-left: 1.2em; max-width: 60ch; }
 .ways li { padding-left: var(--space-2xs); }
 </style>

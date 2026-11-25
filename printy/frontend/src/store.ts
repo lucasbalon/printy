@@ -50,6 +50,7 @@ export const state = reactive({
   settings: null as Settings | null,
   entities: null as HaEntities | null,
   attention: [] as Job[],
+  pending: 0, // imported files waiting to be filed
   spools: { enabled: false, error: null, spools: [] } as SpoolList,
 });
 
@@ -94,6 +95,12 @@ export async function loadAttention() {
   const to = new Date(now.getTime() + 2 * 86_400_000).toISOString();
   const jobs = await api.get<Job[]>(`/jobs?start=${encodeURIComponent(from)}&end=${encodeURIComponent(to)}`);
   state.attention = jobs.filter((j) => j.status === "awaiting_confirmation" || j.status === "needs_attention");
+  await loadPending().catch(() => undefined);
+}
+
+/** How many imported files wait to be filed (badge on "Bibliothèque"). */
+export async function loadPending() {
+  state.pending = (await api.get<unknown[]>("/pending")).length;
 }
 
 // ---- polling ----------------------------------------------------------------
@@ -118,7 +125,14 @@ export function usePolling(fn: () => Promise<unknown>, ms = 5000) {
 // ---- upload -------------------------------------------------------------------
 
 export interface UploadResult {
-  imported: { filename: string; model_id: number; model_name: string; kind: string; duplicate: boolean }[];
+  imported: {
+    filename: string;
+    model_id: number | null;
+    model_name: string | null;
+    kind: string; // sliced | source | pending
+    duplicate: boolean;
+    pending_id?: number | null;
+  }[];
   errors: { filename: string; error: string }[];
 }
 
@@ -169,10 +183,16 @@ export async function uploadFiles(files: File[], modelId?: number): Promise<Uplo
     for (const e of res.errors) toast(`${e.filename} : ${e.error}`, "error");
     const fresh = res.imported.filter((i) => !i.duplicate);
     const dupes = res.imported.length - fresh.length;
-    if (fresh.length === 1) {
-      const f = fresh[0];
+    const waiting = fresh.filter((i) => i.kind === "pending").length;
+    const filed = fresh.filter((i) => i.kind !== "pending");
+    if (filed.length === 1) {
+      const f = filed[0];
       toast(f.kind === "source" ? `Source ajoutée à « ${f.model_name} ».` : `Ajouté à « ${f.model_name} ».`);
-    } else if (fresh.length > 1) toast(`${fresh.length} fichiers ajoutés à la bibliothèque.`);
+    } else if (filed.length > 1) toast(`${filed.length} fichiers ajoutés à la bibliothèque.`);
+    if (waiting) {
+      toast(waiting === 1 ? "Nouveau fichier à trier dans la bibliothèque." : `${waiting} fichiers à trier dans la bibliothèque.`);
+      loadPending().catch(() => undefined);
+    }
     if (dupes) toast(dupes === 1 ? "Ce fichier était déjà dans la bibliothèque." : `${dupes} fichiers étaient déjà dans la bibliothèque.`);
     return res;
   } finally {

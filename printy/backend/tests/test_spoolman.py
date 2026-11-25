@@ -16,6 +16,7 @@ from printy.printers import manager
 from printy.scheduler import scheduler
 from printy.spoolman import Spool, color_distance, plan, spoolman, suggest
 
+from .conftest import upload_new
 from .test_gcode import ORCA  # beige PLA, 37.25 g
 
 WHITE = Spool(1, "Blanc", "Elegoo", "PLA", "#FFFFFF", 500.0, None)
@@ -64,7 +65,7 @@ def test_spool_change_flow(monkeypatch):
     client = TestClient(app)
     assert client.patch("/api/v1/settings", json={"spoolman_url": "http://spoolman.test:7912"}).status_code == 200
 
-    r = client.post("/api/v1/upload", files=[("files", ("cube_spool.gcode", io.BytesIO(ORCA.encode() + b"; spool test\n")))])
+    r = upload_new(client, files=[("files", ("cube_spool.gcode", io.BytesIO(ORCA.encode() + b"; spool test\n")))])
     sliced_id = client.get(f"/api/v1/models/{r.json()['imported'][0]['model_id']}").json()["sliced"][0]["id"]
     pid = client.post("/api/v1/printers", json={
         "name": "Démo bobines", "driver": "demo", "options": {"speed": 1_000_000}, "camera_source": "none",
@@ -127,7 +128,7 @@ def test_morning_reminder(monkeypatch):
     client = TestClient(app)
     client.patch("/api/v1/settings", json={"spoolman_url": "http://spoolman.test:7912", "spool_reminder_morning": "00:00"})
 
-    r = client.post("/api/v1/upload", files=[("files", ("matin.gcode", io.BytesIO(ORCA.encode() + b"; morning\n")))])
+    r = upload_new(client, files=[("files", ("matin.gcode", io.BytesIO(ORCA.encode() + b"; morning\n")))])
     sliced_id = client.get(f"/api/v1/models/{r.json()['imported'][0]['model_id']}").json()["sliced"][0]["id"]
     pid = client.post("/api/v1/printers", json={"name": "Matin", "driver": "demo", "camera_source": "none"}).json()["id"]
     client.post(f"/api/v1/printers/{pid}/spool", json={"spool_id": BLACK.id})
@@ -212,7 +213,7 @@ def test_klipper_tracks_the_spool(monkeypatch):
     assert active["id"] == WHITE.id
 
     # a finished print is not deducted twice
-    r = client.post("/api/v1/upload", files=[("files", ("klipper.gcode", io.BytesIO(ORCA.encode() + b"; klipper\n")))])
+    r = upload_new(client, files=[("files", ("klipper.gcode", io.BytesIO(ORCA.encode() + b"; klipper\n")))])
     sliced_id = client.get(f"/api/v1/models/{r.json()['imported'][0]['model_id']}").json()["sliced"][0]["id"]
     job = client.post("/api/v1/jobs", json={
         "sliced_file_id": sliced_id, "printer_id": pid, "start_at": utcnow().isoformat(), "confirm_required": False,

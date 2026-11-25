@@ -34,7 +34,9 @@ async function drop(e: DragEvent) {
   const modelId = route.name === "model" ? Number(route.params.id) : undefined;
   const res = await uploadFiles(files, modelId);
   const first = res?.imported[0];
-  if (first && !modelId && res.imported.length === 1) router.push(`/bibliotheque/${first.model_id}`);
+  if (!first || modelId || res.imported.length !== 1) return;
+  // filed: open its model; waiting to be filed: the library, where it can be filed
+  router.push(first.model_id ? `/bibliotheque/${first.model_id}` : "/bibliotheque");
 }
 
 onMounted(() => {

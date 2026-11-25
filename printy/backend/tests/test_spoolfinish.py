@@ -10,6 +10,7 @@ from printy.models import Job, Model, SlicedFile
 from printy.spoolfinish import Candidate, proposals, rule_tags
 from printy.spoolman import Spool, spoolman
 
+from .conftest import upload_new
 from .test_gcode import ORCA
 
 
@@ -65,7 +66,7 @@ def test_finish_endpoint_and_plan(monkeypatch):
     monkeypatch.setattr(spoolman, "spools_or_empty", fake_spools)
     monkeypatch.setattr(type(spoolman), "enabled", property(lambda self: True))
     pid = client.post("/api/v1/printers", json={"name": "fin", "driver": "demo", "camera_source": "none"}).json()["id"]
-    r = client.post("/api/v1/upload", files=[("files", ("abat_finish.gcode", io.BytesIO(ORCA.encode() + b"; finish\n")))])
+    r = upload_new(client, files=[("files", ("abat_finish.gcode", io.BytesIO(ORCA.encode() + b"; finish\n")))])
     model_id = r.json()["imported"][0]["model_id"]
     with SessionLocal() as s:
         s.get(Model, model_id).tags = ["abat-jour-test"]

@@ -22,6 +22,7 @@ const links = computed(() => [
 ]);
 
 const attentionCount = computed(() => state.attention.length);
+const pendingCount = computed(() => state.pending);
 </script>
 
 <template>
@@ -42,6 +43,9 @@ const attentionCount = computed(() => state.attention.length);
           <component :is="l.icon" class="nav__icon" aria-hidden="true" />
           <span>{{ l.label }}</span>
           <span v-if="l.exact && attentionCount" class="nav__count" :aria-label="`${attentionCount} à traiter`">{{ attentionCount }}</span>
+          <span v-if="l.to === '/bibliotheque' && pendingCount" class="nav__count" :aria-label="`${pendingCount} fichier(s) à trier`">
+            {{ pendingCount }}
+          </span>
         </RouterLink>
       </nav>
     </div>

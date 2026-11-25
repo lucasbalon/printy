@@ -16,6 +16,7 @@ from printy.printers import manager
 from printy.scheduler import scheduler
 from printy.spoolman import Spool, spoolman
 
+from .conftest import upload_new
 from .test_gcode import ORCA  # 37.25 g, beige PLA
 
 WHITE = Spool(1, "Blanc mat", "Elegoo", "PLA", "#F4F1EA", 800.0, None)
@@ -39,7 +40,7 @@ def test_print_feeds_stock_and_energy(monkeypatch):
     client = TestClient(app)
     client.patch("/api/v1/settings", json={"spoolman_url": "http://spoolman.test:7912"})
 
-    r = client.post("/api/v1/upload", files=[("files", ("stock_lampe.gcode", io.BytesIO(ORCA.encode() + b"; stock\n")))])
+    r = upload_new(client, files=[("files", ("stock_lampe.gcode", io.BytesIO(ORCA.encode() + b"; stock\n")))])
     model_id = r.json()["imported"][0]["model_id"]
     sliced = client.get(f"/api/v1/models/{model_id}").json()["sliced"][0]
     assert client.patch(f"/api/v1/sliced/{sliced['id']}", json={"pieces": 2}).json()["pieces"] == 2
