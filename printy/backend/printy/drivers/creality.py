@@ -68,6 +68,7 @@ class CrealityDriver(PrinterDriver):
         self._ws: Any = None
         self._task: asyncio.Task[None] | None = None
         self._connected = asyncio.Event()
+        self._received = asyncio.Event()  # set by each status message from the printer
         self._uploader = MoonrakerClient(host, int(options.get("moonraker_port") or 7125), None)
 
     # -- connection ---------------------------------------------------------
@@ -112,6 +113,7 @@ class CrealityDriver(PrinterDriver):
             await self._ws.send("ok")
             return
         self._state.update(msg)
+        self._received.set()
 
     async def _send(self, payload: dict[str, Any]) -> None:
         if self._ws is None:
@@ -138,6 +140,19 @@ class CrealityDriver(PrinterDriver):
             remaining_s=int(left) if left is not None else None,
             elapsed_s=int(spent) if spent else None,
         )
+
+    async def fresh_status(self) -> PrinterStatus:
+        """The pushed state may be old (a half-open connection keeps it): ask the printer
+        for its parameters and only trust an answer received now."""
+        if not self._connected.is_set():
+            return PrinterStatus()
+        self._received.clear()
+        try:
+            await self._send({"method": "get", "params": {"reqPrinterPara": 1}})
+            await asyncio.wait_for(self._received.wait(), timeout=5)
+        except (DriverError, TimeoutError, websockets.WebSocketException):
+            return PrinterStatus()
+        return await self.status()
 
     async def upload(self, path: Path, remote_name: str) -> None:
         await self._uploader.upload(path, remote_name)

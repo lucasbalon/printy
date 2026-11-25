@@ -63,7 +63,6 @@ class Scheduler:
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._background: set[asyncio.Task[None]] = set()
-        self._powered_by_us: set[int] = set()
         self._last_progress: dict[int, float] = {}
         self._launching: set[int] = set()  # jobs whose file is being sent right now
         self._stopped: set[int] = set()  # jobs the user stopped from Printy: no start grace
@@ -173,6 +172,7 @@ class Scheduler:
 
         if st == JobStatus.SCHEDULED:
             if now < job.start_at - timedelta(minutes=printer.power_on_lead_min):
+                await self._ask_early(s, job, status, opts)
                 return
             if self._printer_taken(s, job):
                 if now >= job.start_at and "attend" not in job.message:
@@ -183,7 +183,6 @@ class Scheduler:
             if printer.switch_entity:
                 if not await ha.is_on(printer.switch_entity):
                     await ha.set_power(printer.switch_entity, True)
-                    self._powered_by_us.add(printer.id)
                 add_event(job, "power_on", "Imprimante allumée.")
             else:
                 add_event(job, "power_on", "Préparation de l’imprimante.")
@@ -206,10 +205,17 @@ class Scheduler:
             return
 
         if st == JobStatus.AWAITING_CONFIRMATION:
+            if job.powered_at is None:
+                # asked before the power on: the printer is switched on at its usual time,
+                # the answer is still awaited
+                if now >= job.start_at - timedelta(minutes=printer.power_on_lead_min):
+                    job.status = JobStatus.SCHEDULED
+                return
             timeout = timedelta(minutes=int(opts["confirm_timeout_min"]))
-            if job.notified_at and now - job.notified_at > timeout and now >= job.start_at:
+            if job.notified_at and now > max(job.notified_at, job.start_at) + timeout:
                 job.status = JobStatus.NEEDS_ATTENTION
                 add_event(job, "attention", "Pas de confirmation reçue : impression non lancée.")
+                arm_power_off(job)  # switched on for this print: cut once cool
             return
 
         if st == JobStatus.READY:
@@ -244,16 +250,31 @@ class Scheduler:
 
     # -- confirmation -------------------------------------------------------
 
+    @staticmethod
+    def _swap(job: Job) -> bool:
+        """A spool change always needs a human, whatever the confirmation settings."""
+        loaded = job.printer.loaded_spool_id
+        return job.spool_id is not None and loaded is not None and job.spool_id != loaded and job.confirmed_at is None
+
+    @staticmethod
+    def _confirm_time_reached(job: Job, opts: dict) -> bool:
+        return utcnow() >= job.start_at - timedelta(minutes=int(opts["confirm_lead_min"]))
+
+    async def _ask_early(self, s: Session, job: Job, status, opts: dict) -> None:  # noqa: ANN001
+        """Confirmation asked before the printer is switched on (setting "confirm_lead_min")."""
+        if job.notified_at is not None or not self._confirm_time_reached(job, opts):
+            return
+        if not self._swap(job) and (not job.confirm_required or job.confirmed_at or job.printer.bed_clear):
+            return  # nothing to ask, or settled at the power on
+        if status.active or self._printer_taken(s, job):
+            return  # another print is on the bed: asking now makes no sense
+        job.powered_at = None
+        await self._notify_confirmation(job, opts)
+
     async def _ask_confirmation(self, job: Job, opts: dict) -> None:
+        """The printer is on and ready: launch, or wait for the user's confirmation."""
         printer = job.printer
-        # A spool change always needs a human, whatever the confirmation settings.
-        swap = (
-            job.spool_id is not None
-            and printer.loaded_spool_id is not None
-            and job.spool_id != printer.loaded_spool_id
-            and job.confirmed_at is None
-        )
-        if not swap:
+        if not self._swap(job):
             if not job.confirm_required or job.confirmed_at:
                 job.status = JobStatus.READY
                 return
@@ -262,7 +283,15 @@ class Scheduler:
                 job.status = JobStatus.READY
                 add_event(job, "confirmed", "Plateau déclaré vidé après l’impression précédente.")
                 return
+        if job.notified_at is not None:
+            job.status = JobStatus.AWAITING_CONFIRMATION  # already asked before the power on
+            return
+        if self._confirm_time_reached(job, opts):
+            await self._notify_confirmation(job, opts)
 
+    async def _notify_confirmation(self, job: Job, opts: dict) -> None:
+        printer = job.printer
+        swap = self._swap(job)
         image = await self.capture(job)
         job.status = JobStatus.AWAITING_CONFIRMATION
         job.notified_at = utcnow()
@@ -370,6 +399,8 @@ class Scheduler:
             job.status = JobStatus.CANCELLED
             job.finished_at = utcnow()
             add_event(job, "cancelled", "Lancement arrêté depuis Printy.")
+            if job.started_at is not None:
+                arm_power_off(job)
             return
         if job.started_at is None:
             # the upload never finished (Printy restarted while sending)
@@ -409,8 +440,10 @@ class Scheduler:
         job.energy_wh = round((job.energy_wh or 0) + wh, 3)
 
     async def _close_print(self, s: Session, job: Job, opts: dict, *, success: bool) -> None:
-        """For a good print, the pieces go to stock, in the spool's colour."""
+        """For a good print, the pieces go to stock, in the spool's colour.
+        The print was launched by Printy: the plug is cut once the printer has cooled."""
         self._metered_at.pop(job.id, None)
+        arm_power_off(job)
         spools = {sp.id: sp for sp in await spoolman.spools_or_empty()} if job.spool_id is not None else {}
         spool = spools.get(job.spool_id) if job.spool_id is not None else None
         if success and opts.get("stock_auto", True):
@@ -575,7 +608,14 @@ class Scheduler:
     # -- power off ----------------------------------------------------------
 
     async def _maybe_power_off(self, s: Session, printer: Printer, opts: dict) -> None:
-        if not printer.switch_entity or printer.id not in self._powered_by_us:
+        """Cuts the plug after a print launched by Printy, never after one started elsewhere.
+
+        The cached status only filters out the obvious cases; the decision itself rests on
+        the plug's state and the printer's status read again right before cutting."""
+        if not printer.power_off_pending:
+            return
+        if not printer.switch_entity:
+            printer.power_off_pending = False
             return
         now = utcnow()
         busy = s.scalar(
@@ -592,15 +632,40 @@ class Scheduler:
         ).all()
         if any(j.start_at - timedelta(minutes=printer.power_on_lead_min) <= now + window for j in upcoming):
             return
-        status = manager.status(printer.id)
-        if status.state in (PrinterState.PRINTING, PrinterState.PAUSED, PrinterState.BUSY):
+        if not self._can_cut(printer, manager.status(printer.id)):
             return
-        temps = [t for t in (status.nozzle_temp, status.bed_temp) if t is not None]
-        if any(t >= printer.cooldown_temp for t in temps):
+
+        # confirmation from live data, not from what was last seen
+        plug = await ha.switch_state(printer.switch_entity, refresh=True)
+        if plug is None:
+            return  # plug unavailable in Home Assistant: try again later
+        if plug is False:
+            printer.power_off_pending = False  # already cut (by hand or by an automation)
+            return
+        if not self._can_cut(printer, await manager.fresh_status(printer.id)):
             return
         await ha.set_power(printer.switch_entity, False)
-        self._powered_by_us.discard(printer.id)
+        printer.power_off_pending = False
         log.info("%s cooled down, power off", printer.name)
+        last = s.scalar(
+            select(Job).where(Job.printer_id == printer.id, Job.finished_at.is_not(None)).order_by(Job.finished_at.desc()).limit(1)
+        )
+        if last is not None:
+            add_event(last, "power_off", "Imprimante refroidie, prise coupée.")
+
+    @staticmethod
+    def _can_cut(printer: Printer, status) -> bool:  # noqa: ANN001
+        """The printer answers, does nothing and has cooled down."""
+        if status.state in (PrinterState.PRINTING, PrinterState.PAUSED):
+            # no Printy print is running (checked before): a print started elsewhere
+            # took over the printer, its end is not Printy's business
+            printer.power_off_pending = False
+            log.info("%s: print started outside Printy, no automatic power off", printer.name)
+            return False
+        if status.state not in (PrinterState.IDLE, PrinterState.FINISHED, PrinterState.ERROR):
+            return False  # unreachable or busy: its real state is unknown
+        temps = [t for t in (status.nozzle_temp, status.bed_temp) if t is not None]
+        return bool(temps) and all(t < printer.cooldown_temp for t in temps)
 
     # -- user actions (API and notifications) ---------------------------------
 
@@ -627,13 +692,20 @@ class Scheduler:
 # -- job operations shared by the API and the notification handler -------------
 
 
+def arm_power_off(job: Job) -> None:
+    """A print launched by Printy has ended: its plug will be cut once the printer is cool."""
+    if job.printer.switch_entity:
+        job.printer.power_off_pending = True
+
+
 def confirm(job: Job) -> None:
     job.confirmed_at = utcnow()
     if job.spool_id is not None and job.printer.loaded_spool_id != job.spool_id:
         job.printer.loaded_spool_id = job.spool_id  # the user swapped the spool
         manager.want_spool(job.printer_id, job.spool_id)
     if job.status == JobStatus.AWAITING_CONFIRMATION:
-        job.status = JobStatus.READY
+        # asked before the power on: the printer still has to be switched on
+        job.status = JobStatus.READY if job.powered_at is not None else JobStatus.SCHEDULED
     add_event(job, "confirmed", "Plateau vide confirmé.")
 
 
@@ -663,6 +735,7 @@ def cancel(job: Job) -> None:
             raise ValueError("L’imprimante imprime : arrête d’abord l’impression.")
         if job.started_at is not None:
             job.finished_at = utcnow()
+            arm_power_off(job)
     job.status = JobStatus.CANCELLED
     add_event(job, "cancelled", "Annulée.")
 

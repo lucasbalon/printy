@@ -225,6 +225,21 @@ async function rotateKey() {
             <AlertTriangle aria-hidden="true" />
             <span>Les impressions démarreront sans vérification. Une pièce oubliée sur le plateau peut abîmer la buse ou le plateau.</span>
           </p>
+          <div class="form-row">
+            <div class="field">
+              <label for="confirm-lead">Demander la confirmation (min avant)</label>
+              <input id="confirm-lead" class="input mono" type="number" min="0" max="720" :value="s.confirm_lead_min" inputmode="numeric"
+                     @change="saveSoon({ confirm_lead_min: Number(($event.target as HTMLInputElement).value) })" />
+              <span class="field__help">Avant l’allumage de l’imprimante, la photo du plateau n’est possible qu’avec une caméra Home Assistant.</span>
+            </div>
+            <div class="field">
+              <label for="confirm-timeout">Sans réponse, abandonner après (min)</label>
+              <input id="confirm-timeout" class="input mono" type="number" min="5" max="240" :value="s.confirm_timeout_min" inputmode="numeric"
+                     @change="saveSoon({ confirm_timeout_min: Number(($event.target as HTMLInputElement).value) })" />
+              <span class="field__help">Compté à partir de l’heure prévue : l’impression passe « à revoir » et la prise est coupée.</span>
+            </div>
+          </div>
+          <p class="small muted">L’heure d’allumage se règle par imprimante : fiche de l’imprimante, « Allumer avant ».</p>
         </div>
       </section>
 
@@ -407,12 +422,6 @@ async function rotateKey() {
         <summary><ChevronRight aria-hidden="true" />Réglages avancés</summary>
         <div class="more__body">
           <div class="form-row">
-            <div class="field">
-              <label for="adv-timeout">Attente de confirmation (min)</label>
-              <input id="adv-timeout" class="input mono" type="number" min="5" max="240" :value="s.confirm_timeout_min" inputmode="numeric"
-                     @change="saveSoon({ confirm_timeout_min: Number(($event.target as HTMLInputElement).value) })" />
-              <span class="field__help">Passé ce délai, l’impression passe « à revoir » et la prise est coupée.</span>
-            </div>
             <div class="field">
               <label for="adv-keep">Garder allumée si la suivante démarre dans (min)</label>
               <input id="adv-keep" class="input mono" type="number" min="0" max="240" :value="s.keep_on_window_min" inputmode="numeric"

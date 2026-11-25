@@ -91,6 +91,9 @@ class Printer(Base):
     bed_cleared_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     loaded_spool_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # Spoolman id
     last_finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # A print launched by Printy has ended: cut the plug once the printer has cooled.
+    # Stored so that a restart of Printy does not forget it.
+    power_off_pending: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 

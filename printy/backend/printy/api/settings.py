@@ -46,6 +46,7 @@ class OffPeak(BaseModel):
 class SettingsPatch(BaseModel):
     notify_targets: list[str] | None = None
     confirm_by_default: bool | None = None
+    confirm_lead_min: int | None = Field(None, ge=0, le=720)
     confirm_timeout_min: int | None = Field(None, ge=5, le=240)
     keep_on_window_min: int | None = Field(None, ge=0, le=240)
     off_peak: list[OffPeak] | None = None

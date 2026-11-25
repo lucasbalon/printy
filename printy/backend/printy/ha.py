@@ -83,6 +83,19 @@ class HomeAssistant:
             return None
         return r.json().get("state") == "on"
 
+    async def switch_state(self, entity_id: str, *, refresh: bool = False) -> bool | None:
+        """True / False only when Home Assistant knows the switch's state; None when it is
+        unavailable or unknown. With refresh, asks the integration to poll the device first."""
+        if not self.enabled:
+            return self._dev_switches.get(entity_id, False)
+        if refresh:
+            try:
+                await self._http.post("/services/homeassistant/update_entity", json={"entity_id": entity_id})
+            except httpx.HTTPError:
+                pass  # not every integration can be polled: the pushed state is then the reference
+        state = await self.state(entity_id)
+        return {"on": True, "off": False}.get(state or "")
+
     async def state(self, entity_id: str) -> str | None:
         if not self.enabled:
             return "4.2"

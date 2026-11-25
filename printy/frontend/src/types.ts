@@ -217,6 +217,7 @@ export interface OffPeakRange {
 export interface Settings {
   notify_targets: string[];
   confirm_by_default: boolean;
+  confirm_lead_min: number;
   confirm_timeout_min: number;
   keep_on_window_min: number;
   off_peak: OffPeakRange[];

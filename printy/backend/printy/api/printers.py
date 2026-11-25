@@ -115,6 +115,8 @@ async def power(printer_id: int, body: PowerIn, s: DB):
         if st.state in ("printing", "paused"):
             raise HTTPException(409, "Impossible de couper : une impression est en cours.")
     await ha.set_power(p.switch_entity, body.on)
+    p.power_off_pending = False  # the user took the plug in hand
+    s.commit()
     await manager.refresh(p)
     return serialize.printer(p)
 

@@ -20,17 +20,22 @@ l'imprimante refroidie.
 
 | Moment | Ce que fait Printy |
 |---|---|
-| Début − délai d'allumage (10 min par défaut) | Allume la prise, attend que l'imprimante réponde |
-| Imprimante prête | Envoie une notification avec photo : **Lancer**, **Reporter d'1 h**, **Annuler** |
+| Début − délai d'allumage (10 min par défaut, réglé par imprimante) | Allume la prise, attend que l'imprimante réponde |
+| Début − délai de confirmation (10 min par défaut, dans les réglages) | Envoie une notification avec photo : **Lancer**, **Reporter d'1 h**, **Annuler** |
 | Heure prévue, confirmée | Envoie le fichier et lance l'impression |
 | Fin | Notification « Impression terminée » avec le bouton **Plateau vidé** |
 | Refroidissement | Coupe la prise quand buse et plateau sont sous 45 °C, sauf si une autre impression démarre dans les 30 min |
 
-- Sans réponse après 15 min, l'impression passe **à revoir** et n'est pas lancée.
+- La confirmation peut partir avant l'allumage (par exemple la veille d'une impression
+  de nuit) : la photo n'est alors possible qu'avec une caméra Home Assistant.
+- Sans réponse 15 min après l'heure prévue, l'impression passe **à revoir**, n'est pas
+  lancée et la prise est coupée une fois l'imprimante froide.
 - Toucher **Plateau vidé** à la fin d'une impression vaut confirmation pour la suivante.
 - La confirmation peut être désactivée par impression ; un avertissement le rappelle.
-- Printy ne coupe que les prises qu'il a lui-même allumées, et jamais une
-  imprimante chaude ou en cours d'impression.
+- Printy ne coupe la prise qu'après une impression qu'il a lui-même lancée,
+  jamais après une impression démarrée depuis l'écran ou le trancheur.
+- Avant de couper, il relit l'état de la prise et interroge l'imprimante à
+  l'instant : si elle ne répond pas, est chaude ou imprime, la prise reste allumée.
 
 ## Impressions en cours
 

@@ -103,6 +103,19 @@ class PrinterManager:
         live.updated_at = utcnow().timestamp()
         return live
 
+    async def fresh_status(self, printer_id: int) -> PrinterStatus:
+        """Status asked to the printer right now (OFFLINE if it does not answer)."""
+        live = self.live.get(printer_id)
+        if live is None:
+            return PrinterStatus()
+        try:
+            status = await asyncio.wait_for(live.driver.fresh_status(), timeout=12)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("fresh status %s: %s", printer_id, exc)
+            status = PrinterStatus(state=PrinterState.OFFLINE)
+        live.status = status
+        return status
+
     async def _sync_spool(self, printer: Printer, live: Live) -> None:
         """Keeps Printy's loaded spool and the printer's active spool (Moonraker) in step.
 

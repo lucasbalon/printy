@@ -104,6 +104,11 @@ class PrinterDriver(ABC):
     @abstractmethod
     async def status(self) -> PrinterStatus: ...
 
+    async def fresh_status(self) -> PrinterStatus:
+        """Status just asked to the printer, never a cached one (used before cutting power).
+        OFFLINE when the printer does not answer now."""
+        return await self.status()
+
     @abstractmethod
     async def upload(self, path: Path, remote_name: str) -> None: ...
 

@@ -14,8 +14,12 @@ DEFAULTS: dict[str, Any] = {
     "notify_targets": [],
     # Ask "is the bed empty?" before each print (can be turned off per job)
     "confirm_by_default": True,
+    # The "is the bed empty?" notification goes out this long before the start
+    # (before the power on if larger than the printer's power-on lead: photo only if
+    # the camera works with the printer off)
+    "confirm_lead_min": 10,
     # Without an answer after this delay, the job needs attention and power is cut
-    "confirm_timeout_min": 15,
+    "confirm_timeout_min": 15,  # counted from the start time at the earliest
     # Do not cut power if another print starts within this delay
     "keep_on_window_min": 30,
     # Off-peak electricity ranges, local time
