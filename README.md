@@ -146,7 +146,12 @@ repository.yaml          dépôt d’add-ons Home Assistant
 printy/                  l’add-on (config.yaml, Dockerfile, run.sh, DOCS.md)
   backend/printy/        FastAPI, SQLAlchemy, SQLite
     drivers/             un pilote par marque
-    scheduler.py         cycle de vie des impressions planifiées
+    scheduler.py         cycle de vie des impressions planifiées (boucle, confirmation, lancement, suivi)
+    job_ops.py           actions sur une impression (confirmer, reporter, annuler…) et journal
+    reminders.py         rappels : bobines du matin, pièce oubliée sur le plateau
+    power.py             coupure de la prise une fois l’imprimante refroidie
+    usage.py             consommation de filament déduite dans Spoolman
+    photos.py            photos du plateau pour les notifications
     ha.py, ha_entities.py   Home Assistant (prises, caméras, notifications, entités)
     spoolman.py          bobines, choix de bobine, plan de filament
   frontend/src/          Vue 3, TypeScript

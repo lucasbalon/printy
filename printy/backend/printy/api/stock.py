@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 from .. import production
 from ..db import get_session
 from ..models import Job, JobStatus, Model, StockItem, StockMove
-from ..scheduler import add_event
+from ..job_ops import add_event
 from . import serialize
 
 router = APIRouter(tags=["stock"])

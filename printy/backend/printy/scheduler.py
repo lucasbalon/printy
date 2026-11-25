@@ -16,49 +16,36 @@ import asyncio
 import logging
 import time
 from datetime import timedelta
-from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from . import bedcheck
+from . import bedcheck, photos, power, production, reminders, usage
 from . import settings as settings_store
-from .settings import tune
 from .config import config
 from .db import SessionLocal, utcnow
 from .drivers import DriverError, PrinterState
 from .ha import NotifyAction, ha
-from .models import (
-    ACTIVE_STATUSES,
-    CLOSED_STATUSES,
-    NOT_STARTED_STATUSES,
-    OPEN_STATUSES,
-    Job,
-    JobEvent,
-    JobStatus,
-    Printer,
-)
-from . import production
 from .ha_entities import publisher
+from .job_ops import (
+    add_event,
+    arm_power_off,
+    cancel,
+    confirm,
+    minutes_label,
+    remote_name,
+    remove,
+    snooze,
+    spool_swapped,
+)
+from .models import ACTIVE_STATUSES, NOT_STARTED_STATUSES, OPEN_STATUSES, Job, JobStatus, Printer
 from .printers import manager
-from .spoolman import SpoolmanError, describe, spoolman
-from .spoolman import plan as spoolman_plan
+from .settings import tune
+from .spoolman import describe, spoolman
 
 log = logging.getLogger(__name__)
 
-TICK_S = 5
-# Delays and thresholds: settings.Tunables (shown in the settings)
-SNAPSHOT_DIR = config.data_dir / "snapshots"
-SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def add_event(job: Job, kind: str, message: str = "") -> None:
-    job.events.append(JobEvent(kind=kind, message=message))
-    job.message = message if kind in ("attention", "error") else ""
-
-
-def remote_name(job: Job) -> str:
-    return f"printy-{job.id}-{Path(job.sliced_file.filename).name}".replace(" ", "_")
+TICK_S = 5  # delays and thresholds: settings.Tunables (shown in the settings)
 
 
 class Scheduler:
@@ -122,10 +109,10 @@ class Scheduler:
             for job in jobs:
                 await self._guard(s, f"impression {job.id}", self._step(s, job, opts))
             for printer in s.query(Printer).all():
-                await self._guard(s, "coupure", self._maybe_power_off(s, printer, opts))
-            await self._guard(s, "spoolman", self._report_usage(s))
-            await self._guard(s, "rappel du matin", self._morning_reminder(s, opts))
-            await self._guard(s, "rappel du plateau", self._bed_reminder(s, opts))
+                await self._guard(s, "coupure", power.maybe_power_off(s, printer, opts))
+            await self._guard(s, "spoolman", usage.report(s))
+            await self._guard(s, "rappel du matin", reminders.morning(s, opts))
+            await self._guard(s, "rappel du plateau", reminders.forgotten_piece(s, opts))
             await self._guard(s, "entités", publisher.run(s, opts))
 
     async def _guard(self, s: Session, name: str, step) -> None:  # noqa: ANN001
@@ -314,8 +301,8 @@ class Scheduler:
         request, which keeps the first request's time (and so its deadline)."""
         printer = job.printer
         swap = self._swap(job)
-        data = await self.photo(printer)
-        image = await self.capture(job, data)
+        data = await photos.photo(printer)
+        image = await photos.capture(job, data)
         hint = bedcheck.sentence(bedcheck.verdict(printer.id, data))
         job.status = JobStatus.AWAITING_CONFIRMATION
         if not again:
@@ -350,7 +337,7 @@ class Scheduler:
             urgent=True,
             actions=[
                 NotifyAction(f"PRINTY_START_{job.id}", start_label),
-                NotifyAction(f"PRINTY_SNOOZE_{job.id}", f"Reporter de {_minutes(tune.snooze_min)}"),
+                NotifyAction(f"PRINTY_SNOOZE_{job.id}", f"Reporter de {minutes_label(tune.snooze_min)}"),
                 NotifyAction(f"PRINTY_CANCEL_{job.id}", "Annuler", destructive=True),
             ],
         )
@@ -366,39 +353,6 @@ class Scheduler:
             f"{job.sliced_file.model.name} : {reason[0].lower()}{reason[1:]} Ouvre Printy pour la relancer ou l’annuler.",
             tag=f"printy-job-{job.id}",
         )
-
-    async def photo(self, printer: Printer) -> bytes | None:
-        """A bed photo now, or None (no camera, printer camera off, no answer)."""
-        try:
-            if printer.camera_source == "ha" and printer.camera_entity:
-                return await asyncio.wait_for(ha.camera_snapshot(printer.camera_entity), timeout=15)
-            if printer.camera_source == "printer" and (driver := manager.driver(printer.id)):
-                if manager.status(printer.id).state == PrinterState.OFFLINE:
-                    return None
-                return await asyncio.wait_for(driver.snapshot(), timeout=15)
-        except Exception as exc:  # noqa: BLE001
-            log.debug("photo %s: %s", printer.name, exc)
-        return None
-
-    async def image_url(self, printer: Printer, data: bytes | None, name: str) -> str | None:
-        """Where a notification finds the photo. Without a photo, no image at all: a link
-        that does not load shows an error on the phone."""
-        if not data:
-            return None
-        if url := await publisher.photo_url(printer, data):
-            return url  # camera entity published through MQTT
-        if config.ha_www_dir:
-            (config.ha_www_dir / f"{name}.jpg").write_bytes(data)
-            return f"/local/printy/{name}.jpg?v={int(time.time())}"
-        return None
-
-    async def capture(self, job: Job, data: bytes | None = None) -> str | None:
-        """Takes (or uses) a bed photo for the job; returns the notification image."""
-        if data is None:
-            data = await self.photo(job.printer)
-        if data:
-            (SNAPSHOT_DIR / f"job-{job.id}.jpg").write_bytes(data)
-        return await self.image_url(job.printer, data, f"job-{job.id}")
 
     # -- launch and follow ----------------------------------------------------
 
@@ -418,7 +372,7 @@ class Scheduler:
                 if job is None or job.confirmed_at is None:
                     return
                 printer = job.printer
-                data = await self.photo(printer)
+                data = await photos.photo(printer)
             if data:
                 bedcheck.save_reference(printer.id, data)
         except Exception as exc:  # noqa: BLE001 - never blocks the launch
@@ -538,7 +492,7 @@ class Scheduler:
         elif status.state == PrinterState.ERROR:
             job.status = JobStatus.FAILED
             job.finished_at = now
-            self._record_usage(job, self._last_progress.pop(job.id, 0))
+            usage.record(job, self._last_progress.pop(job.id, 0))
             add_event(job, "error", status.message or "L’imprimante signale une erreur.")
             await self._close_print(s, job, opts, success=False)
         elif status.state in (PrinterState.FINISHED, PrinterState.IDLE):
@@ -551,7 +505,7 @@ class Scheduler:
             done = status.state == PrinterState.FINISHED or progress > 0.98
             job.finished_at = now
             job.printer.last_finished_at = now
-            self._record_usage(job, 1.0 if done else progress)
+            usage.record(job, 1.0 if done else progress)
             if done:
                 job.status = JobStatus.FINISHED
                 add_event(job, "finished", "Impression terminée.")
@@ -564,7 +518,7 @@ class Scheduler:
 
     async def _notify_finished(self, s: Session, job: Job) -> None:
         opts = settings_store.get_all(s)
-        image = await self.capture(job)
+        image = await photos.capture(job)
         message = f"{job.sliced_file.model.name} est prête. Touche « Plateau vidé » une fois la pièce retirée."
         nxt = s.scalar(
             select(Job)
@@ -592,190 +546,6 @@ class Scheduler:
             actions=actions,
         )
 
-    # -- morning spool reminder ----------------------------------------------
-
-    async def _morning_reminder(self, s: Session, opts: dict) -> None:
-        """Once a day at the chosen time: spools to prepare for the day's prints."""
-        at = opts.get("spool_reminder_morning")
-        if not at or not spoolman.enabled:
-            return
-        now = utcnow().astimezone(config.timezone)
-        today = now.date().isoformat()
-        hour, minute = (int(x) for x in at.split(":"))
-        if (now.hour, now.minute) < (hour, minute) or opts.get("spool_reminder_sent_on") == today:
-            return
-        settings_store.set_many(s, {"spool_reminder_sent_on": today})
-
-        horizon = now + timedelta(days=1)
-        open_jobs = s.scalars(
-            select(Job)
-            .where(Job.status.in_([st.value for st in OPEN_STATUSES if st != JobStatus.NEEDS_ATTENTION]))
-            .options(joinedload(Job.sliced_file), joinedload(Job.printer))
-        ).unique().all()
-        spools = await spoolman.spools_or_empty()
-        by_id = {sp.id: sp for sp in spools}
-        loaded = {p.id: p.loaded_spool_id for p in s.query(Printer).all()}
-        fil = spoolman_plan(list(open_jobs), loaded, spools, manager.deducted(list(open_jobs)))
-        lines: list[str] = []
-        swaps: list[Job] = []
-        for job in sorted(open_jobs, key=lambda j: j.start_at):
-            info = fil.get(job.id)
-            if info is None or job.status != JobStatus.SCHEDULED or job.start_at > horizon:
-                continue
-            when = job.start_at.astimezone(config.timezone).strftime("%H:%M")
-            sp = by_id.get(job.spool_id) if job.spool_id is not None else None
-            name = describe(sp) if sp else "la bonne bobine"
-            if info.spool_change:
-                lines.append(f"{job.printer.name} : mets {name} pour {job.sliced_file.model.name} ({when}).")
-                swaps.append(job)
-            if info.low_filament:
-                lines.append(f"Pas assez de filament sur {name} pour {job.sliced_file.model.name} ({when}).")
-        if not lines:
-            return
-        actions = [NotifyAction(f"PRINTY_SPOOL_{swaps[0].id}", "Bobine changée")] if len(swaps) == 1 else None
-        await ha.notify(
-            opts["notify_targets"],
-            "Printy : bobines à préparer",
-            " ".join(lines),
-            actions=actions,
-            tag="printy-spools",
-        )
-
-    # -- forgotten piece -------------------------------------------------------
-
-    async def _bed_reminder(self, s: Session, opts: dict) -> None:
-        """A finished piece was never declared removed and the next print comes soon."""
-        if not opts.get("bed_reminder", True):
-            return
-        now = utcnow()
-        for printer in s.query(Printer).all():
-            finished = printer.last_finished_at
-            if finished is None or printer.bed_clear or now - finished < timedelta(minutes=tune.bed_reminder_after_min):
-                continue
-            if printer.bed_reminded_at is not None and printer.bed_reminded_at >= finished:
-                continue  # one reminder per finished print
-            nxt = s.scalar(
-                select(Job)
-                .where(Job.printer_id == printer.id, Job.status == JobStatus.SCHEDULED.value)
-                .order_by(Job.start_at)
-                .limit(1)
-            )
-            before = timedelta(hours=tune.bed_reminder_hours)
-            if nxt is None or nxt.start_at - now > before or manager.status(printer.id).active:
-                continue
-            printer.bed_reminded_at = now
-            data = await self.photo(printer)
-            verdict = bedcheck.verdict(printer.id, data)
-            local_start = nxt.start_at.astimezone(config.timezone).strftime("%H:%M")
-            message = f"{nxt.sliced_file.model.name} est prévue à {local_start}. "
-            if verdict == "empty":
-                message += "La photo montre un plateau vide : touche « Plateau vidé » si la pièce a bien été retirée."
-            else:
-                message += "Retire la pièce, puis touche « Plateau vidé ». " + bedcheck.sentence(verdict)
-            await ha.notify(
-                opts["notify_targets"],
-                f"{printer.name} : pièce encore sur le plateau ?",
-                message.strip(),
-                image=await self.image_url(printer, data, f"printer-{printer.id}"),
-                tag=f"printy-printer-{printer.id}",
-                actions=[NotifyAction(f"PRINTY_BEDCLEAR_{printer.id}", "Plateau vidé")],
-            )
-
-    # -- filament consumption -----------------------------------------------
-
-    @staticmethod
-    def _record_usage(job: Job, share: float) -> None:
-        grams = job.sliced_file.filament_g
-        if grams and job.spool_id is not None and share > 0:
-            job.filament_used_g = round(grams * min(1.0, share), 2)
-            if manager.tracked(job.printer_id):
-                # Moonraker already reported the real extruded length to Spoolman
-                job.spool_reported = True
-                add_event(job, "spool", "Consommation déduite par Klipper (Moonraker) dans Spoolman.")
-
-    async def _report_usage(self, s: Session) -> None:
-        """Deducts used filament in Spoolman; retried on later ticks if Spoolman is down."""
-        if not spoolman.enabled:
-            return
-        pending = s.scalars(
-            select(Job).where(
-                Job.spool_id.is_not(None),
-                Job.filament_used_g.is_not(None),
-                Job.spool_reported.is_(False),
-            )
-        ).all()
-        for job in pending:
-            try:
-                await spoolman.use(job.spool_id, job.filament_used_g)
-            except SpoolmanError as exc:
-                log.warning("spool usage for job %s not reported: %s", job.id, exc)
-                return
-            job.spool_reported = True
-            add_event(job, "spool", f"{job.filament_used_g:g} g déduits de la bobine dans Spoolman.")
-            s.commit()
-
-    # -- power off ----------------------------------------------------------
-
-    async def _maybe_power_off(self, s: Session, printer: Printer, opts: dict) -> None:
-        """Cuts the plug after a print launched by Printy, never after one started elsewhere.
-
-        The cached status only filters out the obvious cases; the decision itself rests on
-        the plug's state and the printer's status read again right before cutting."""
-        if not printer.power_off_pending:
-            return
-        if not printer.switch_entity:
-            printer.power_off_pending = False
-            return
-        now = utcnow()
-        busy = s.scalar(
-            select(Job.id)
-            .where(Job.printer_id == printer.id)
-            .where(Job.status.in_([st.value for st in ACTIVE_STATUSES]))
-            .limit(1)
-        )
-        if busy:
-            return
-        window = timedelta(minutes=int(opts["keep_on_window_min"]))
-        upcoming = s.scalars(
-            select(Job).where(Job.printer_id == printer.id, Job.status == JobStatus.SCHEDULED.value)
-        ).all()
-        if any(j.start_at - timedelta(minutes=printer.power_on_lead_min) <= now + window for j in upcoming):
-            return
-        if not self._can_cut(printer, manager.status(printer.id)):
-            return
-
-        # confirmation from live data, not from what was last seen
-        plug = await ha.switch_state(printer.switch_entity, refresh=True)
-        if plug is None:
-            return  # plug unavailable in Home Assistant: try again later
-        if plug is False:
-            printer.power_off_pending = False  # already cut (by hand or by an automation)
-            return
-        if not self._can_cut(printer, await manager.fresh_status(printer.id)):
-            return
-        await ha.set_power(printer.switch_entity, False)
-        printer.power_off_pending = False
-        log.info("%s cooled down, power off", printer.name)
-        last = s.scalar(
-            select(Job).where(Job.printer_id == printer.id, Job.finished_at.is_not(None)).order_by(Job.finished_at.desc()).limit(1)
-        )
-        if last is not None:
-            add_event(last, "power_off", "Imprimante refroidie, prise coupée.")
-
-    @staticmethod
-    def _can_cut(printer: Printer, status) -> bool:  # noqa: ANN001
-        """The printer answers, does nothing and has cooled down."""
-        if status.state in (PrinterState.PRINTING, PrinterState.PAUSED):
-            # no Printy print is running (checked before): a print started elsewhere
-            # took over the printer, its end is not Printy's business
-            printer.power_off_pending = False
-            log.info("%s: print started outside Printy, no automatic power off", printer.name)
-            return False
-        if status.state not in (PrinterState.IDLE, PrinterState.FINISHED, PrinterState.ERROR):
-            return False  # unreachable or busy: its real state is unknown
-        temps = [t for t in (status.nozzle_temp, status.bed_temp) if t is not None]
-        return bool(temps) and all(t < printer.cooldown_temp for t in temps)
-
     # -- user actions (API and notifications) ---------------------------------
 
     async def on_notification_action(self, action: str) -> None:
@@ -795,80 +565,12 @@ class Scheduler:
                     return
                 if verb == "CANCEL" and job.status in NOT_STARTED_STATUSES:
                     remove(s, job)  # not started: nothing to keep in the history
+                elif verb == "CANCEL":
+                    cancel(job, launching=self.launching(job.id))
                 else:
-                    {"START": confirm, "SNOOZE": snooze, "CANCEL": cancel}[verb](job)
+                    {"START": confirm, "SNOOZE": snooze}[verb](job)
             s.commit()
         self.poke()
-
-
-# -- job operations shared by the API and the notification handler -------------
-
-
-def arm_power_off(job: Job) -> None:
-    """A print launched by Printy has ended: its plug will be cut once the printer is cool."""
-    if job.printer.switch_entity:
-        job.printer.power_off_pending = True
-
-
-def confirm(job: Job) -> None:
-    job.confirmed_at = utcnow()
-    if job.spool_id is not None and job.printer.loaded_spool_id != job.spool_id:
-        job.printer.loaded_spool_id = job.spool_id  # the user swapped the spool
-        manager.want_spool(job.printer_id, job.spool_id)
-    if job.status == JobStatus.AWAITING_CONFIRMATION:
-        # asked before the power on: the printer still has to be switched on
-        job.status = JobStatus.READY if job.powered_at is not None else JobStatus.SCHEDULED
-    add_event(job, "confirmed", "Plateau vide confirmé.")
-
-
-def spool_swapped(job: Job) -> None:
-    """The user put the job's spool on the printer ahead of time."""
-    if job.spool_id is not None:
-        job.printer.loaded_spool_id = job.spool_id
-        manager.want_spool(job.printer_id, job.spool_id)
-        add_event(job, "spool", "Changement de bobine signalé.")
-
-
-def _minutes(m: int) -> str:
-    """60 → "1 h", 90 → "1 h 30", 45 → "45 min"."""
-    h, rest = divmod(int(m), 60)
-    if not h:
-        return f"{rest} min"
-    return f"{h} h {rest:02d}" if rest else f"{h} h"
-
-
-def snooze(job: Job, minutes: int | None = None) -> None:
-    minutes = minutes or tune.snooze_min
-    job.start_at = max(job.start_at, utcnow()) + timedelta(minutes=minutes)
-    job.status = JobStatus.SCHEDULED
-    job.notified_at = None
-    add_event(job, "snoozed", f"Reportée de {minutes} min.")
-
-
-def remove(s: Session, job: Job) -> None:
-    """Deletes a print that has not started, or one from the history."""
-    if job.status not in NOT_STARTED_STATUSES | CLOSED_STATUSES:
-        raise ValueError("Cette impression est lancée : annule-la ou arrête-la d’abord.")
-    if job.status in NOT_STARTED_STATUSES and job.powered_at is not None:
-        arm_power_off(job)  # switched on for this print: cut once cool
-    (SNAPSHOT_DIR / f"job-{job.id}.jpg").unlink(missing_ok=True)
-    s.delete(job)
-
-
-def cancel(job: Job) -> None:
-    """Cancels in Printy. A print the printer is really running must be stopped on it first."""
-    if job.status in (JobStatus.FINISHED, JobStatus.FAILED, JobStatus.CANCELLED):
-        return
-    if job.status in (JobStatus.PRINTING, JobStatus.PAUSED, JobStatus.STARTING):
-        if scheduler.launching(job.id):
-            raise ValueError("Envoi du fichier en cours : réessaie dans un instant.")
-        if manager.status(job.printer_id).active:
-            raise ValueError("L’imprimante imprime : arrête d’abord l’impression.")
-        if job.started_at is not None:
-            job.finished_at = utcnow()
-            arm_power_off(job)
-    job.status = JobStatus.CANCELLED
-    add_event(job, "cancelled", "Annulée.")
 
 
 scheduler = Scheduler()

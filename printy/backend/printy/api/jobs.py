@@ -10,15 +10,15 @@ from pydantic import AwareDatetime, BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from .. import offpeak
-from .. import scheduler as sched
+from .. import job_ops, offpeak
 from .. import settings as settings_store
 from ..config import config
 from ..db import get_session, utcnow
 from ..ha import ha
 from ..models import CLOSED_STATUSES, OPEN_STATUSES, Job, JobStatus, Printer, SlicedFile
 from ..printers import manager
-from ..scheduler import SNAPSHOT_DIR, add_event, scheduler
+from ..job_ops import SNAPSHOT_DIR, add_event
+from ..scheduler import scheduler
 from ..spoolman import plan as filament_plan
 from ..spoolman import spoolman, suggest
 from . import serialize
@@ -261,7 +261,7 @@ def confirm_job(job_id: int, s: DB):
     job = _get(s, job_id)
     if JobStatus(job.status) in CLOSED_STATUSES:
         raise HTTPException(409, "Cette impression est terminée.")
-    sched.confirm(job)
+    job_ops.confirm(job)
     s.commit()
     scheduler.poke()
     return serialize.job(job, events=True)
@@ -273,7 +273,7 @@ def spool_swapped(job_id: int, s: DB):
     job = _get(s, job_id)
     if job.spool_id is None:
         raise HTTPException(409, "Aucune bobine n’est associée à cette impression.")
-    sched.spool_swapped(job)
+    job_ops.spool_swapped(job)
     s.commit()
     scheduler.poke()
     return serialize.job(job, events=True)
@@ -290,7 +290,7 @@ def start_now(job_id: int, s: DB):
     job.start_at = now
     job.confirmed_at = now
     if job.status == JobStatus.AWAITING_CONFIRMATION and job.spool_id is not None and job.printer.loaded_spool_id != job.spool_id:
-        sched.spool_swapped(job)  # answered the spool change request from the app
+        job_ops.spool_swapped(job)  # answered the spool change request from the app
     if JobStatus(job.status) in (JobStatus.NEEDS_ATTENTION, JobStatus.AWAITING_CONFIRMATION):
         job.status = JobStatus.READY if job.status == JobStatus.AWAITING_CONFIRMATION else JobStatus.SCHEDULED
     add_event(job, "confirmed", "Lancement immédiat demandé, plateau vide confirmé.")
@@ -304,7 +304,7 @@ def snooze_job(job_id: int, s: DB, minutes: int | None = None):
     job = _get(s, job_id)
     if JobStatus(job.status) not in MOVABLE | {JobStatus.READY}:
         raise HTTPException(409, "Cette impression ne peut plus être reportée.")
-    sched.snooze(job, minutes)
+    job_ops.snooze(job, minutes)
     s.commit()
     scheduler.poke()
     return serialize.job(job, events=True)
@@ -315,7 +315,7 @@ async def cancel_job(job_id: int, s: DB):
     job = _get(s, job_id)
     sent = job.status in (JobStatus.STARTING, JobStatus.PRINTING, JobStatus.PAUSED) and job.started_at is not None
     try:
-        sched.cancel(job)
+        job_ops.cancel(job, launching=scheduler.launching(job.id))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     s.commit()
@@ -336,7 +336,7 @@ async def delete_job(job_id: int, s: DB):
     if job is None:
         return
     try:
-        sched.remove(s, job)
+        job_ops.remove(s, job)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     s.commit()

@@ -13,7 +13,8 @@ from .. import settings as settings_store
 from ..db import get_session, utcnow
 from ..models import OPEN_STATUSES, Job, Model, Printer, SlicedFile
 from ..printers import manager
-from ..scheduler import add_event, scheduler
+from ..job_ops import add_event
+from ..scheduler import scheduler
 from ..spoolfinish import Candidate, proposals, rule_tags
 from ..spoolman import GOOD_MATCH, Spool, SpoolmanError, color_distance, limits, rank_spools, spoolman, suggest
 from . import serialize
