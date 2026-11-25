@@ -91,6 +91,8 @@ def printer(p: Printer) -> dict[str, Any]:
         "bed_clear": p.bed_clear,
         # a finished print has not been declared removed yet
         "piece_on_bed": p.last_finished_at is not None and not p.bed_clear,
+        # the plug will be cut once the printer has cooled (after a print launched by Printy)
+        "power_off_pending": bool(p.power_off_pending and p.switch_entity),
         "loaded_spool_id": p.loaded_spool_id,
         "sort_order": p.sort_order,
         "live": {

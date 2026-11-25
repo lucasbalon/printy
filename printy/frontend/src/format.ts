@@ -109,21 +109,6 @@ export function offPeakShare(start: Date, end: Date, ranges: OffPeakRange[]): nu
   return Math.min(1, inside / total);
 }
 
-/** Next off-peak start after `from`. */
-export function nextOffPeak(from: Date, ranges: OffPeakRange[]): Date | null {
-  if (!ranges.length) return null;
-  const candidates: Date[] = [];
-  for (let i = 0; i < 2; i++) {
-    for (const r of ranges) {
-      const [h, m] = r.start.split(":").map(Number);
-      const d = addDays(startOfDay(from), i);
-      d.setHours(h, m);
-      if (d > from) candidates.push(d);
-    }
-  }
-  return candidates.sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
-}
-
 export const jobStatusLabel: Record<JobStatus, string> = {
   scheduled: "Planifiée",
   powering_on: "Allumage",

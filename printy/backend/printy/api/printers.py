@@ -121,6 +121,17 @@ async def power(printer_id: int, body: PowerIn, s: DB):
     return serialize.printer(p)
 
 
+@router.post("/printers/{printer_id}/keep-on")
+def keep_on(printer_id: int, s: DB):
+    """Cancels the automatic power off planned after the last print."""
+    p = s.get(Printer, printer_id)
+    if p is None:
+        raise HTTPException(404)
+    p.power_off_pending = False
+    s.commit()
+    return serialize.printer(p)
+
+
 class ActionIn(BaseModel):
     action: Literal["pause", "resume", "cancel"]
 

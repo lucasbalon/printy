@@ -40,6 +40,26 @@ class HomeAssistant:
         )
         self._listener: asyncio.Task[None] | None = None
         self._dev_switches: dict[str, bool] = {}
+        self._panel: str | None = None
+
+    async def panel_path(self) -> str | None:
+        """Printy's page in Home Assistant (/hassio/ingress/<slug>), opened by a tap on a
+        notification."""
+        if not self.enabled:
+            return None
+        if self._panel is None:
+            try:
+                async with httpx.AsyncClient(timeout=10) as http:
+                    r = await http.get(
+                        "http://supervisor/addons/self/info",
+                        headers={"Authorization": f"Bearer {config.supervisor_token}"},
+                    )
+                r.raise_for_status()
+                self._panel = f"/hassio/ingress/{r.json()['data']['slug']}"
+            except (httpx.HTTPError, KeyError, ValueError) as exc:
+                log.warning("add-on slug unknown: %s", exc)
+                return None
+        return self._panel
 
     async def close(self) -> None:
         if self._listener:
@@ -143,10 +163,21 @@ class HomeAssistant:
         image: str | None = None,
         actions: list[NotifyAction] | None = None,
         tag: str | None = None,
+        urgent: bool = False,
     ) -> None:
+        """On iPhone the buttons show with a long press (or a swipe then "Show"); a simple
+        tap opens Printy, where the same choices are offered."""
         data: dict[str, Any] = {}
         if image:
             data["image"] = image
+        if panel := await self.panel_path():
+            data["url"] = panel  # iOS
+            data["clickAction"] = panel  # Android
+        if urgent:
+            # iOS: shown even in a Focus mode; Android: high priority
+            data["push"] = {"interruption-level": "time-sensitive"}
+            data["ttl"] = 0
+            data["priority"] = "high"
         if actions:
             data["actions"] = [
                 {"action": a.action, "title": a.title, **({"destructive": True} if a.destructive else {})}

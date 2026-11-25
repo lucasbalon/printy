@@ -55,7 +55,9 @@ def get_session() -> Iterator[Session]:
 
 def init_db() -> None:
     from . import models  # noqa: F401  (registers tables)
+    from .backup import restore_if_broken
 
+    restore_if_broken(config.data_dir / "printy.db")
     Base.metadata.create_all(engine)
     _add_missing_columns()
 

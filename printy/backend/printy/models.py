@@ -94,6 +94,8 @@ class Printer(Base):
     # A print launched by Printy has ended: cut the plug once the printer has cooled.
     # Stored so that a restart of Printy does not forget it.
     power_off_pending: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # last "piece still on the bed" reminder, one per finished print
+    bed_reminded_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 

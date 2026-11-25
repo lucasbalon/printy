@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import re
 import secrets
+import tempfile
+from datetime import date
+from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .. import settings as settings_store
+from ..backup import snapshot
 from ..config import config
 from ..db import get_session
 from ..ha import ha
@@ -46,6 +51,7 @@ class OffPeak(BaseModel):
 class SettingsPatch(BaseModel):
     notify_targets: list[str] | None = None
     confirm_by_default: bool | None = None
+    bed_reminder: bool | None = None
     confirm_lead_min: int | None = Field(None, ge=0, le=720)
     confirm_timeout_min: int | None = Field(None, ge=5, le=240)
     keep_on_window_min: int | None = Field(None, ge=0, le=240)
@@ -92,6 +98,15 @@ async def test_spoolman(body: SpoolmanTest):
 def rotate_key(s: DB):
     settings_store.set_many(s, {"octoprint_api_key": secrets.token_hex(16)})
     return get_settings(s)
+
+
+@router.get("/backup")
+def export_backup(tasks: BackgroundTasks):
+    """Consistent copy of Printy's database, to download."""
+    tmp = Path(tempfile.mkdtemp()) / "printy.db"
+    snapshot(config.data_dir / "printy.db", tmp)
+    tasks.add_task(lambda: (tmp.unlink(missing_ok=True), tmp.parent.rmdir()))
+    return FileResponse(tmp, media_type="application/vnd.sqlite3", filename=f"printy-{date.today().isoformat()}.db")
 
 
 @router.post("/settings/test-notification")

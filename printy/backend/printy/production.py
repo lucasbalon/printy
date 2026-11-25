@@ -73,4 +73,9 @@ def model_energy(s: Session, model: Model) -> dict[str, Any]:
     return {
         "kwh_per_piece": round(sum(per_piece) / len(per_piece), 3) if per_piece else None,
         "measured_on": len(per_piece),
+        # newest first, to show the trend from one print to the next
+        "history": [
+            {"at": (j.finished_at or j.start_at).isoformat(), "kwh_per_piece": round(v, 3)}
+            for j, v in zip(jobs, per_piece, strict=True)
+        ],
     }

@@ -58,4 +58,5 @@ export const urls = {
   downloadSource: (id: number) => `${BASE}/sources/${id}/download`,
   printerSnapshot: (id: number) => `${BASE}/printers/${id}/snapshot?t=${Date.now()}`,
   jobSnapshot: (id: number) => `${BASE}/jobs/${id}/snapshot?t=${Date.now()}`,
+  backup: `${BASE}/backup`,
 };

@@ -178,7 +178,7 @@ async function remove() {
           <div class="field">
             <label for="p-power">Mesure de consommation</label>
             <EntitySelect id="p-power" v-model="form.power_entity" :options="entities.power_sensors" placeholder="sensor.prise_k2_puissance" />
-            <span class="field__help">Sert au coût électrique par impression.</span>
+            <span class="field__help">Mesure les kWh consommés par pièce.</span>
           </div>
           <div v-for="o in driver?.options ?? []" :key="o.key" class="field">
             <label :for="`opt-${o.key}`">{{ o.label }}</label>

@@ -8,6 +8,7 @@ disappear when Home Assistant restarts and come back within a minute).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -143,6 +144,28 @@ class MqttLink:
         self.client.publish(f"{base}/state", state, retain=True)
         self.client.publish(f"{base}/attributes", json.dumps(e.attributes, default=str), retain=True)
 
+    def announce_photo(self, p: Printer) -> str:
+        """camera.printy_<printer>_photo: the last bed photo taken by Printy."""
+        object_id = f"printy_{slug(p.name)}_photo"
+        unique_id = f"printy_printer{p.id}_photo"
+        if unique_id not in self.announced:
+            cfg = {
+                "name": "Photo du plateau",
+                "unique_id": unique_id,
+                "default_entity_id": f"camera.{object_id}",
+                "topic": f"{PREFIX}/{object_id}/image",
+                "availability_topic": f"{PREFIX}/status",
+                "device": {"identifiers": [f"printy_printer_{p.id}"], "name": f"Printy {p.name}", "manufacturer": "Printy"},
+            }
+            self.client.publish(f"homeassistant/camera/{PREFIX}/{unique_id}/config", json.dumps(cfg), retain=True)
+            self.announced.add(unique_id)
+        return object_id
+
+    def publish_photo(self, p: Printer, data: bytes) -> str:
+        object_id = self.announce_photo(p)
+        self.client.publish(f"{PREFIX}/{object_id}/image", data, retain=True).wait_for_publish(5)
+        return f"camera.{object_id}"
+
 
 class EntityPublisher:
     def __init__(self) -> None:
@@ -162,6 +185,9 @@ class EntityPublisher:
             if await self.mqtt.ensure():
                 for e in entities:
                     self.mqtt.publish(e)
+                for p in s.scalars(select(Printer)):
+                    if p.camera_source != "none":
+                        self.mqtt.announce_photo(p)  # exists before the first notification
                 self.status.update(mode="mqtt", error="")
             else:
                 for e in entities:
@@ -178,6 +204,18 @@ class EntityPublisher:
         except Exception as exc:  # noqa: BLE001
             self.status["error"] = f"{exc.__class__.__name__} : {exc}"
             log.warning("Home Assistant entities not published: %s", exc)
+
+    async def photo_url(self, p: Printer, data: bytes) -> str | None:
+        """Publishes a bed photo as a camera entity; its URL works in every notification
+        (the Home Assistant app fetches it with its own login)."""
+        if not ha.enabled or not await self.mqtt.ensure():
+            return None
+        try:
+            entity = await asyncio.to_thread(self.mqtt.publish_photo, p, data)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("bed photo not published: %s", exc)
+            return None
+        return f"/api/camera_proxy/{entity}"
 
     def collect(self, s: Session) -> list[Entity]:
         out: list[Entity] = []

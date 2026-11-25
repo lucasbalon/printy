@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,6 +10,7 @@ from pydantic import AwareDatetime, BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from .. import offpeak
 from .. import scheduler as sched
 from .. import settings as settings_store
 from ..config import config
@@ -65,8 +67,8 @@ def _check_slot(s: Session, printer_id: int, start: datetime, duration_s: int, e
         )
 
 
-async def _filament(s: Session) -> dict:
-    """Spool changes and filament shortages over all open jobs."""
+async def _filament(s: Session, extra: list | None = None) -> dict:
+    """Spool changes and filament shortages over all open jobs (plus `extra`, not saved)."""
     settings_store.get_all(s)
     open_jobs = s.scalars(
         select(Job)
@@ -75,7 +77,49 @@ async def _filament(s: Session) -> dict:
         .options(joinedload(Job.sliced_file))
     ).unique().all()
     loaded = {p.id: p.loaded_spool_id for p in s.scalars(select(Printer))}
-    return filament_plan(list(open_jobs), loaded, await spoolman.spools_or_empty())
+    return filament_plan(list(open_jobs) + (extra or []), loaded, await spoolman.spools_or_empty())
+
+
+class PreviewIn(BaseModel):
+    sliced_file_id: int
+    printer_id: int
+    start_at: AwareDatetime | None = None  # empty: now
+    spool_id: int | None = None
+    exclude_job_id: int | None = None  # the job being moved
+
+
+@router.post("/jobs/preview")
+async def preview(body: PreviewIn, s: DB):
+    """What planning this print would mean: best off-peak slot, spool change, filament."""
+    f = s.get(SlicedFile, body.sliced_file_id)
+    if f is None or s.get(Printer, body.printer_id) is None:
+        raise HTTPException(404, "Fichier ou imprimante introuvable.")
+    now = utcnow()
+    duration = timedelta(seconds=f.duration_s or 3600)
+    busy = [
+        (j.start_at, j.end_at)
+        for j in s.scalars(
+            select(Job).where(Job.printer_id == body.printer_id, Job.status.in_([st.value for st in OPEN_STATUSES]))
+        )
+        if j.id != body.exclude_job_id
+    ]
+    if w := manager.print_window(body.printer_id):
+        busy.append(w)
+    slot = offpeak.best_slot(settings_store.get(s, "off_peak") or [], duration, busy, now)
+    out: dict = {"off_peak": {"start_at": slot[0].isoformat(), "share": slot[1]} if slot else None}
+    if body.spool_id is not None:
+        virtual = SimpleNamespace(
+            id=-1, printer_id=body.printer_id, spool_id=body.spool_id,
+            start_at=max(body.start_at or now, now), sliced_file=SimpleNamespace(filament_g=f.filament_g),
+        )
+        info = (await _filament(s, [virtual]))[-1]
+        out |= {
+            "spool_change": info.spool_change,
+            "previous_spool_id": info.previous_spool_id,
+            "low_filament": info.low_filament,
+            "spool_remaining_g": info.remaining_before_g,
+        }
+    return out
 
 
 @router.get("/jobs")
@@ -240,6 +284,8 @@ def start_now(job_id: int, s: DB):
     _check_slot(s, job.printer_id, now, job.duration_s, exclude=job.id)
     job.start_at = now
     job.confirmed_at = now
+    if job.status == JobStatus.AWAITING_CONFIRMATION and job.spool_id is not None and job.printer.loaded_spool_id != job.spool_id:
+        sched.spool_swapped(job)  # answered the spool change request from the app
     if JobStatus(job.status) in (JobStatus.NEEDS_ATTENTION, JobStatus.AWAITING_CONFIRMATION):
         job.status = JobStatus.READY if job.status == JobStatus.AWAITING_CONFIRMATION else JobStatus.SCHEDULED
     add_event(job, "confirmed", "Lancement immédiat demandé, plateau vide confirmé.")

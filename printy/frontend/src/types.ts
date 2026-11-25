@@ -39,9 +39,18 @@ export interface ModelSummary {
   stock_alert: number | null;
 }
 
+export interface JobPreview {
+  off_peak: { start_at: string; share: number } | null;
+  spool_change?: boolean;
+  previous_spool_id?: number | null;
+  low_filament?: boolean;
+  spool_remaining_g?: number | null;
+}
+
 export interface Energy {
   kwh_per_piece: number | null;
   measured_on: number;
+  history: { at: string; kwh_per_piece: number }[];
 }
 
 export interface StockVariant {
@@ -106,6 +115,7 @@ export interface Printer {
   camera_entity: string | null;
   power_on_lead_min: number;
   cooldown_temp: number;
+  power_off_pending: boolean;
   bed_clear: boolean;
   piece_on_bed: boolean;
   loaded_spool_id: number | null;
@@ -218,6 +228,7 @@ export interface Settings {
   notify_targets: string[];
   confirm_by_default: boolean;
   confirm_lead_min: number;
+  bed_reminder: boolean;
   confirm_timeout_min: number;
   keep_on_window_min: number;
   off_peak: OffPeakRange[];

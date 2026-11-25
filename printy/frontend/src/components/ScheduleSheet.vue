@@ -2,19 +2,9 @@
 import { AlertTriangle, Search } from "lucide-vue-next";
 import { computed, ref, watch } from "vue";
 import { api } from "../api";
-import {
-  addDays,
-  duration,
-  fromInputs,
-  grams,
-  nextOffPeak,
-  offPeakShare,
-  startOfDay,
-  toInputs,
-  when,
-} from "../format";
+import { duration, fromInputs, grams, offPeakShare, toInputs, when } from "../format";
 import { attempt, loadPrinters, loadSettings, loadSpools, spoolById, state } from "../store";
-import type { Job, ModelFull, ModelSummary, Spool, SpoolList } from "../types";
+import type { Job, JobPreview, ModelFull, ModelSummary, Spool, SpoolList } from "../types";
 import AppSheet from "./AppSheet.vue";
 import ModelThumb from "./ModelThumb.vue";
 import SpoolPicker from "./SpoolPicker.vue";
@@ -44,6 +34,9 @@ const spoolTouched = ref(false);
 const ranked = ref<Spool[]>([]);
 // "now": the print leaves as soon as the printer is ready, no notification
 const now = ref(true);
+// the time typed is the start, or the end (ready at…)
+const anchor = ref<"start" | "end">("start");
+const preview = ref<JobPreview | null>(null);
 
 function inAnHour(): Date {
   const d = new Date(Date.now() + 60 * 60_000);
@@ -52,9 +45,21 @@ function inAnHour(): Date {
 }
 
 function setStart(d: Date) {
-  const i = toInputs(d);
+  const shown = anchor.value === "end" ? new Date(d.getTime() + durationMs()) : d;
+  const i = toInputs(shown);
   date.value = i.date;
   hour.value = i.time;
+}
+
+function durationMs(): number {
+  return (version.value?.duration_s ?? 3600) * 1000;
+}
+
+function setAnchor(a: "start" | "end") {
+  if (a === anchor.value) return;
+  const s = start.value;
+  anchor.value = a;
+  if (s) setStart(s); // the same print, shown by its start or its end
 }
 
 async function pickModel(id: number, preferSliced?: number) {
@@ -69,6 +74,8 @@ watch(
     if (!open) return;
     error.value = "";
     query.value = "";
+    anchor.value = "start";
+    preview.value = null;
     model.value = null;
     slicedId.value = null;
     spoolId.value = null;
@@ -96,7 +103,12 @@ const filtered = computed(() => {
 });
 
 const version = computed(() => model.value?.sliced.find((s) => s.id === slicedId.value) ?? null);
-const start = computed(() => (now.value ? new Date() : date.value && hour.value ? fromInputs(date.value, hour.value) : null));
+const typed = computed(() => (date.value && hour.value ? fromInputs(date.value, hour.value) : null));
+const start = computed(() => {
+  if (now.value) return new Date();
+  if (!typed.value) return null;
+  return anchor.value === "end" ? new Date(typed.value.getTime() - (version.value?.duration_s ?? 3600) * 1000) : typed.value;
+});
 const end = computed(() =>
   start.value ? new Date(start.value.getTime() + (version.value?.duration_s ?? 3600) * 1000) : null,
 );
@@ -106,15 +118,34 @@ const inPast = computed(() => !now.value && !!start.value && start.value.getTime
 const printer = computed(() => state.printers.find((p) => p.id === printerId.value) ?? null);
 const printerBusy = computed(() => ["printing", "paused"].includes(printer.value?.live?.state ?? ""));
 
-const quickStarts = computed(() => {
-  const out: { label: string; at: Date }[] = [];
-  const hc = nextOffPeak(new Date(), offPeak.value);
-  if (hc) out.push({ label: `Heures creuses, ${when(hc)}`, at: hc });
-  const tomorrow = addDays(startOfDay(new Date()), 1);
-  tomorrow.setHours(8, 0);
-  out.push({ label: "Demain 8 h", at: tomorrow });
-  return out;
+// best off-peak slot, spool change and filament at the chosen time (asked to Printy)
+let previewSeq = 0;
+watch(
+  () => [slicedId.value, printerId.value, spoolId.value, now.value ? "now" : start.value?.getTime(), props.open] as const,
+  async () => {
+    if (!props.open || !slicedId.value || !printerId.value) {
+      preview.value = null;
+      return;
+    }
+    const seq = ++previewSeq;
+    const res = await api
+      .post<JobPreview>("/jobs/preview", {
+        sliced_file_id: slicedId.value,
+        printer_id: printerId.value,
+        start_at: now.value || !start.value ? null : start.value.toISOString(),
+        spool_id: spoolId.value,
+      })
+      .catch(() => null);
+    if (seq === previewSeq) preview.value = res;
+  },
+);
+const offPeakSlot = computed(() => {
+  const s = preview.value?.off_peak;
+  return s ? { at: new Date(s.start_at), share: s.share } : null;
 });
+const atOffPeakSlot = computed(
+  () => !now.value && !!offPeakSlot.value && !!start.value && Math.abs(start.value.getTime() - offPeakSlot.value.at.getTime()) < 60_000,
+);
 
 // Spools ranked for the chosen file; the best match is preselected
 watch(
@@ -135,14 +166,22 @@ watch(
   },
 );
 const chosenSpool = computed(() => ranked.value.find((s) => s.id === spoolId.value) ?? null);
-const loadedSpool = computed(() => spoolById(state.printers.find((p) => p.id === printerId.value)?.loaded_spool_id));
-const needsSwap = computed(() => !!chosenSpool.value && !!loadedSpool.value && chosenSpool.value.id !== loadedSpool.value.id);
-const tooLittle = computed(
-  () =>
-    !!chosenSpool.value &&
-    chosenSpool.value.remaining_g != null &&
-    !!version.value?.filament_g &&
-    chosenSpool.value.remaining_g < version.value.filament_g * 1.05,
+// the spool on the printer at that time: the one loaded now, or the previous planned print's
+const previousSpool = computed(() =>
+  preview.value?.previous_spool_id != null
+    ? spoolById(preview.value.previous_spool_id)
+    : spoolById(state.printers.find((p) => p.id === printerId.value)?.loaded_spool_id),
+);
+const needsSwap = computed(() =>
+  preview.value?.spool_change != null
+    ? preview.value.spool_change
+    : !!chosenSpool.value && !!previousSpool.value && chosenSpool.value.id !== previousSpool.value.id,
+);
+const remainingThen = computed(() => preview.value?.spool_remaining_g ?? chosenSpool.value?.remaining_g ?? null);
+const tooLittle = computed(() =>
+  preview.value?.low_filament != null
+    ? preview.value.low_filament
+    : remainingThen.value != null && !!version.value?.filament_g && remainingThen.value < version.value.filament_g * 1.05,
 );
 
 const canSave = computed(() => !!slicedId.value && !!printerId.value && !!start.value && !saving.value);
@@ -275,14 +314,16 @@ function versionLabel(v: ModelFull["sliced"][number]): string {
         <p v-if="needsSwap" class="notice">
           <AlertTriangle aria-hidden="true" />
           <span>
-            {{ state.printers.find((p) => p.id === printerId)?.name }} a {{ loadedSpool?.label }} chargée : Printy te demandera de
-            changer de bobine avant le lancement.
+            Changement de bobine : {{ previousSpool?.label ?? "une autre bobine" }} sera sur
+            {{ state.printers.find((p) => p.id === printerId)?.name }} à ce moment. Printy te demandera de la changer et attendra ta
+            confirmation avant de lancer.
           </span>
         </p>
         <p v-if="tooLittle" class="notice notice--error">
           <AlertTriangle aria-hidden="true" />
           <span>
-            Il reste {{ grams(chosenSpool?.remaining_g) }} sur cette bobine, l’impression en demande {{ grams(version?.filament_g) }}.
+            Filament peut-être insuffisant : il restera {{ grams(remainingThen) }} sur cette bobine, l’impression en demande
+            {{ grams(version?.filament_g) }}. Tu peux planifier quand même.
           </span>
         </p>
       </fieldset>
@@ -295,10 +336,15 @@ function versionLabel(v: ModelFull["sliced"][number]): string {
           <button type="button" :aria-pressed="!now" @click="pickLater()">Plus tard</button>
         </div>
         <template v-if="!now">
-          <div v-if="quickStarts.length" class="quick">
-            <button v-for="q in quickStarts" :key="q.label" type="button" class="tag" @click="pickLater(q.at)">
-              {{ q.label }}
+          <div v-if="offPeakSlot" class="quick">
+            <button type="button" class="tag" :aria-pressed="atOffPeakSlot" @click="pickLater(offPeakSlot.at)">
+              Heures creuses : {{ when(offPeakSlot.at) }}
+              <template v-if="offPeakSlot.share < 0.99">({{ Math.round(offPeakSlot.share * 100) }} %)</template>
             </button>
+          </div>
+          <div class="segmented" role="group" aria-label="Heure choisie">
+            <button type="button" :aria-pressed="anchor === 'start'" @click="setAnchor('start')">Commencer à</button>
+            <button type="button" :aria-pressed="anchor === 'end'" @click="setAnchor('end')">Prête pour</button>
           </div>
           <div class="form-row">
             <div class="field">
@@ -306,7 +352,7 @@ function versionLabel(v: ModelFull["sliced"][number]): string {
               <input id="sched-date" v-model="date" class="input" type="date" required />
             </div>
             <div class="field">
-              <label for="sched-time">Heure de début</label>
+              <label for="sched-time">{{ anchor === "end" ? "Heure de fin" : "Heure de début" }}</label>
               <input id="sched-time" v-model="hour" class="input" type="time" step="60" required />
             </div>
           </div>
@@ -316,7 +362,11 @@ function versionLabel(v: ModelFull["sliced"][number]): string {
           <span>{{ printer?.name }} imprime déjà : choisis « Plus tard » ou une autre imprimante.</span>
         </p>
         <dl v-if="start && end" class="summary">
-          <div>
+          <div v-if="!now && anchor === 'end'">
+            <dt>Début</dt>
+            <dd>{{ when(start) }}</dd>
+          </div>
+          <div v-else>
             <dt>Fin prévue</dt>
             <dd>{{ when(end) }}</dd>
           </div>

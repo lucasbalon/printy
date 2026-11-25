@@ -499,7 +499,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
                   v-for="seg in segmentsFor(d, p.id)"
                   :key="`${seg.job.id}-${seg.top}`"
                   class="block"
-                  :class="[blockClass(seg.job), { 'is-ghosted': drag?.active && drag.job.id === seg.job.id }]"
+                  :class="[blockClass(seg.job), { 'is-ghosted': drag?.active && drag.job.id === seg.job.id, 'block--swap': seg.startsHere && seg.job.spool_change }]"
                   :style="{ top: `${seg.top}px`, height: `${seg.height}px`, '--filament': spoolById(seg.job.spool_id)?.color ?? seg.job.color ?? 'var(--color-paper-3)' }"
                   role="button"
                   tabindex="0"
@@ -518,6 +518,10 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
                   </span>
                   <span class="block__time mono">{{ time(seg.job.start_at) }}</span>
                   <span class="block__name">{{ seg.job.model_name }}</span>
+                  <span v-if="seg.startsHere && seg.job.spool_change && seg.height > 44" class="block__swap">
+                    <span class="swatch" :style="{ background: spoolById(seg.job.spool_id)?.color ?? 'var(--color-paper-3)' }" />
+                    Mettre {{ spoolById(seg.job.spool_id)?.label ?? "la bobine prévue" }}
+                  </span>
                   <span v-if="seg.height > 64" class="block__meta">
                     {{ (seg.job.status === "printing" || seg.job.status === "paused") && seg.job.remaining_s != null
                       ? `reste ${duration(seg.job.remaining_s)}`
@@ -680,6 +684,9 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
 .block--attention .block__flags { color: inherit; }
 .block__name { font-weight: 500; font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .block__meta { color: inherit; opacity: 0.8; }
+.block--swap { border-top: 3px solid var(--color-accent-strong); }
+.block__swap { display: flex; align-items: center; gap: var(--space-3xs); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.block__swap .swatch { flex: none; }
 .block__progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--color-accent); transform-origin: left; transition: transform var(--dur-long) var(--ease-out); }
 
 .ghost {

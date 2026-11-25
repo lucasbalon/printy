@@ -83,6 +83,10 @@ async function setLoaded(p: Printer, id: number | null) {
   await attempt(() => api.post(`/printers/${p.id}/spool`, { spool_id: id }), id ? "Bobine chargée mise à jour." : "Bobine retirée.");
   attempt(loadPrinters);
 }
+async function keepOn(p: Printer) {
+  await attempt(() => api.post(`/printers/${p.id}/keep-on`), "La prise restera allumée.");
+  attempt(loadPrinters);
+}
 async function bedClear(p: Printer) {
   await attempt(() => api.post(`/printers/${p.id}/bed-clear`), "Plateau marqué comme vidé.");
   attempt(loadPrinters);
@@ -208,7 +212,14 @@ async function bedClear(p: Printer) {
                 </span>
               </label>
             </div>
-            <p v-else class="small muted">Pas de prise associée : allumage manuel.</p>
+            <div v-if="p.switch_entity && p.power_off_pending && p.live.power_on" class="row power-off">
+              <span class="small">
+                Coupure prévue dès que buse et plateau sont sous <span class="num">{{ temp(p.cooldown_temp) }}</span>
+                <template v-if="p.live.state === 'offline'"> (imprimante injoignable : la prise reste allumée en attendant)</template>
+              </span>
+              <button type="button" class="btn btn--ghost btn--sm" @click="keepOn(p)">Laisser allumée</button>
+            </div>
+            <p v-if="!p.switch_entity" class="small muted">Pas de prise associée : allumage manuel.</p>
 
             <div class="row bed">
               <span v-if="p.bed_clear" class="status status--ok">Plateau libéré</span>
@@ -253,6 +264,7 @@ async function bedClear(p: Printer) {
 .readings dd { margin: 0; font-size: var(--text-xl); font-weight: 500; }
 
 .printer__rows { display: grid; gap: var(--space-sm); }
+.power-off { display: flex; flex-wrap: wrap; gap: var(--space-xs); align-items: center; justify-content: space-between; padding: var(--space-xs) var(--space-sm); background: var(--color-paper-2); }
 .bed { display: flex; flex-wrap: wrap; gap: var(--space-xs); align-items: center; }
 .bed:empty { display: none; }
 </style>

@@ -36,6 +36,40 @@ l'imprimante refroidie.
   jamais après une impression démarrée depuis l'écran ou le trancheur.
 - Avant de couper, il relit l'état de la prise et interroge l'imprimante à
   l'instant : si elle ne répond pas, est chaude ou imprime, la prise reste allumée.
+  La carte de l'imprimante affiche la coupure prévue, avec **Laisser allumée**.
+- **Pièce oubliée** (désactivable dans les réglages) : si une pièce terminée n'a pas
+  été déclarée retirée 2 h avant la prochaine impression, Printy envoie un rappel.
+- **Photo du plateau** : juste avant chaque impression confirmée, Printy garde une
+  photo du plateau vide. Les photos suivantes lui sont comparées et la notification
+  indique si le plateau semble vide ou occupé. Ce n'est qu'une indication : la
+  décision reste la tienne.
+
+## Notifications sur iPhone
+
+- Les boutons (**Lancer**, **Reporter**, **Annuler**) s'affichent avec un appui long
+  sur la notification : c'est le fonctionnement d'iOS. Un simple appui ouvre Printy,
+  qui propose les mêmes choix.
+- La demande de confirmation est « urgente » : elle passe même en mode Concentration.
+- La photo est publiée dans Home Assistant comme une caméra (`camera.printy_…_photo`,
+  via l'add-on Mosquitto), lisible par l'application où que tu sois. Sans photo
+  disponible, la notification part sans image plutôt qu'avec une image en erreur.
+
+## Planifier
+
+- **Commencer à** ou **Prête pour** : donne l'heure de début, ou l'heure à laquelle
+  la pièce doit être prête ; Printy calcule l'autre à partir de la durée.
+- **Heures creuses** : le bouton place l'impression dans le premier créneau libre
+  qui en profite le plus (dans les 3 jours).
+- Le changement de bobine et le filament insuffisant sont signalés dès la
+  planification, en tenant compte des impressions déjà prévues avant. Le filament
+  insuffisant ne bloque pas.
+
+## Sauvegarde
+
+Printy est inclus dans les sauvegardes de Home Assistant, sans s'arrêter : une copie
+cohérente de la base est faite juste avant. **Réglages → Sauvegarde → Exporter la base
+de données** télécharge cette base. Les fichiers de la bibliothèque sont dans
+`share/printy` : coche « Share » dans la sauvegarde pour les inclure.
 
 ## Impressions en cours
 
@@ -73,9 +107,10 @@ Dans **Réglages → Spoolman**, indique l'adresse de Spoolman (par exemple
 - **À la planification**, Printy propose la bobine dont la couleur et la matière
   correspondent au fichier ; tu peux en choisir une autre ou ne pas suivre la bobine.
 - **Changement de bobine** : si une impression demande une autre bobine que celle
-  chargée, une flèche l'indique dans le planning. Les rappels :
-  - **au lancement** (toujours) : à l'allumage, Printy demande de confirmer
-    (« Bobine changée, lancer »), même si la confirmation est désactivée ;
+  chargée, le bloc du planning l'indique (« Mettre … »). Les rappels :
+  - **au lancement** (toujours) : si l'imprimante (Spoolman via Moonraker) a encore
+    une autre bobine, Printy demande de confirmer (« Bobine changée, lancer ») et
+    attend, même si la confirmation est désactivée ou l'impression lancée tout de suite ;
   - **à la fin de l'impression précédente** (réglable) : dans la notification
     « Impression terminée », avec un bouton « Bobine changée » ;
   - **chaque matin** (réglable, 8 h par défaut) : un résumé des bobines à préparer

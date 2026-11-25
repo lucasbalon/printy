@@ -20,6 +20,8 @@ DEFAULTS: dict[str, Any] = {
     "confirm_lead_min": 10,
     # Without an answer after this delay, the job needs attention and power is cut
     "confirm_timeout_min": 15,  # counted from the start time at the earliest
+    # Reminder when a finished piece is still on the bed 2 h before the next print
+    "bed_reminder": True,
     # Do not cut power if another print starts within this delay
     "keep_on_window_min": 30,
     # Off-peak electricity ranges, local time

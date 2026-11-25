@@ -4,7 +4,7 @@ import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, urls } from "../api";
 import ModelThumb from "../components/ModelThumb.vue";
-import { bytes, duration, grams, kwh } from "../format";
+import { bytes, duration, grams, kwh, when } from "../format";
 import { attempt, libraryVersion, toast, uploadFiles, uploading, uploadProgress } from "../store";
 import type { ModelFull, Product } from "../types";
 
@@ -91,6 +91,13 @@ async function addTag() {
   await patch({ tags: [...(model.value?.tags ?? []), t] });
 }
 const removeTag = (t: string) => patch({ tags: (model.value?.tags ?? []).filter((x) => x !== t) });
+
+/** Change from the previous print, e.g. "+12 %" (blank when stable). */
+function trend(v: number, before: number): string {
+  if (!before) return "";
+  const pct = Math.round(((v - before) / before) * 100);
+  return Math.abs(pct) < 3 ? "=" : `${pct > 0 ? "+" : "−"}${Math.abs(pct)} %`;
+}
 
 function num(v: string): number | null {
   const n = Number(v.replace(",", "."));
@@ -349,6 +356,15 @@ function schedule(slicedId?: number) {
                   ? `moyenne des ${product.energy.measured_on} dernières impressions mesurées par la prise`
                   : "mesurée par la prise de l’imprimante dès la prochaine impression" }}
               </p>
+              <ol v-if="(product?.energy.history.length ?? 0) > 1" class="energy-history small" aria-label="Dernières impressions">
+                <li v-for="(h, i) in product!.energy.history" :key="h.at">
+                  <span class="muted">{{ when(h.at) }}</span>
+                  <span class="num">{{ kwh(h.kwh_per_piece) }}</span>
+                  <span v-if="i < product!.energy.history.length - 1" class="muted">
+                    {{ trend(h.kwh_per_piece, product!.energy.history[i + 1].kwh_per_piece) }}
+                  </span>
+                </li>
+              </ol>
             </div>
             <div class="field">
               <label for="m-alert">Alerte si stock sous</label>
@@ -451,6 +467,9 @@ function schedule(slicedId?: number) {
 .production__variants { display: grid; gap: var(--space-2xs); margin: 0; padding: 0; list-style: none; }
 .production__variants li { display: flex; align-items: center; gap: var(--space-xs); }
 .production__energy { display: grid; gap: var(--space-3xs); }
+.energy-history { display: grid; gap: var(--space-3xs); margin: var(--space-2xs) 0 0; padding: 0; list-style: none; }
+.energy-history li { display: grid; grid-template-columns: minmax(0, 1fr) auto 4.5em; gap: var(--space-xs); }
+.energy-history li > :last-child { text-align: right; }
 .production__big { font-size: var(--text-xl); font-weight: 500; font-variant-numeric: tabular-nums; }
 .production__fields { display: grid; gap: var(--space-md); align-content: start; }
 .production__big { margin: 0; }

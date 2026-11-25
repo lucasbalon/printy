@@ -21,6 +21,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from . import bedcheck
 from . import settings as settings_store
 from .config import config
 from .db import SessionLocal, utcnow
@@ -45,6 +46,8 @@ BUSY_GRACE = timedelta(minutes=30)
 BOOT_SETTLE_S = 120
 # Upload and start command together
 LAUNCH_TIMEOUT_S = 600
+# A finished piece still on the bed this long before the next print: reminder
+BED_REMINDER_BEFORE = timedelta(hours=2)
 SNAPSHOT_DIR = config.data_dir / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -122,6 +125,7 @@ class Scheduler:
                 await self._guard(s, "coupure", self._maybe_power_off(s, printer, opts))
             await self._guard(s, "spoolman", self._report_usage(s))
             await self._guard(s, "rappel du matin", self._morning_reminder(s, opts))
+            await self._guard(s, "rappel du plateau", self._bed_reminder(s, opts))
             await self._guard(s, "entités", publisher.run(s, opts))
 
     async def _guard(self, s: Session, name: str, step) -> None:  # noqa: ANN001
@@ -219,6 +223,11 @@ class Scheduler:
             return
 
         if st == JobStatus.READY:
+            if now >= job.start_at and self._swap(job):
+                # the printer (Spoolman via Moonraker) still has another spool: ask, wait
+                job.confirmed_at = None
+                await self._notify_confirmation(job, opts)
+                return
             if now >= job.start_at:
                 job.status = JobStatus.STARTING
                 job.started_at = None
@@ -230,6 +239,8 @@ class Scheduler:
             return
 
         if st == JobStatus.STARTING:
+            if job.started_at is not None:
+                self._meter(job, opts)  # heating and calibration count too
             await self._follow_start(s, job, status, opts)
             return
 
@@ -254,7 +265,7 @@ class Scheduler:
     def _swap(job: Job) -> bool:
         """A spool change always needs a human, whatever the confirmation settings."""
         loaded = job.printer.loaded_spool_id
-        return job.spool_id is not None and loaded is not None and job.spool_id != loaded and job.confirmed_at is None
+        return job.spool_id is not None and loaded is not None and job.spool_id != loaded
 
     @staticmethod
     def _confirm_time_reached(job: Job, opts: dict) -> bool:
@@ -283,6 +294,10 @@ class Scheduler:
                 job.status = JobStatus.READY
                 add_event(job, "confirmed", "Plateau déclaré vidé après l’impression précédente.")
                 return
+        elif job.confirmed_at is not None:
+            # confirmed, but the printer still has another spool: ask again, about the spool
+            job.confirmed_at = None
+            job.notified_at = None
         if job.notified_at is not None:
             job.status = JobStatus.AWAITING_CONFIRMATION  # already asked before the power on
             return
@@ -292,7 +307,9 @@ class Scheduler:
     async def _notify_confirmation(self, job: Job, opts: dict) -> None:
         printer = job.printer
         swap = self._swap(job)
-        image = await self.capture(job)
+        data = await self.photo(printer)
+        image = await self.capture(job, data)
+        hint = bedcheck.sentence(bedcheck.verdict(printer.id, data))
         job.status = JobStatus.AWAITING_CONFIRMATION
         job.notified_at = utcnow()
         local_start = job.start_at.astimezone(config.timezone).strftime("%H:%M")
@@ -306,16 +323,19 @@ class Scheduler:
             message = f"Mets {new_label} pour {model} ({local_start}), puis vérifie que le plateau est vide."
             start_label = "Bobine changée, lancer"
         else:
-            add_event(job, "confirmation_requested", "Confirmation du plateau vide demandée.")
+            add_event(job, "confirmation_requested", f"Confirmation du plateau vide demandée. {hint}".strip())
             title = f"{printer.name} : le plateau est-il vide ?"
             message = f"{model} doit démarrer à {local_start}."
             start_label = "Lancer"
+        if hint:
+            message += f" {hint}"
         await ha.notify(
             opts["notify_targets"],
             title,
             message,
             image=image,
             tag=f"printy-job-{job.id}",
+            urgent=True,
             actions=[
                 NotifyAction(f"PRINTY_START_{job.id}", start_label),
                 NotifyAction(f"PRINTY_SNOOZE_{job.id}", "Reporter d'1 h"),
@@ -323,30 +343,62 @@ class Scheduler:
             ],
         )
 
-    async def capture(self, job: Job) -> str | None:
-        """Takes a bed photo; returns the image reference for the notification."""
-        printer = job.printer
-        data: bytes | None = None
-        if printer.camera_source == "ha" and printer.camera_entity:
-            data = await ha.camera_snapshot(printer.camera_entity)
-        elif printer.camera_source == "printer" and (driver := manager.driver(printer.id)):
-            data = await driver.snapshot()
-        if not data:
-            return f"/api/camera_proxy/{printer.camera_entity}" if printer.camera_entity else None
-        (SNAPSHOT_DIR / f"job-{job.id}.jpg").write_bytes(data)
-        if config.ha_www_dir:
-            (config.ha_www_dir / f"job-{job.id}.jpg").write_bytes(data)
-            return f"/local/printy/job-{job.id}.jpg?v={int(time.time())}"
+    async def photo(self, printer: Printer) -> bytes | None:
+        """A bed photo now, or None (no camera, printer camera off, no answer)."""
+        try:
+            if printer.camera_source == "ha" and printer.camera_entity:
+                return await asyncio.wait_for(ha.camera_snapshot(printer.camera_entity), timeout=15)
+            if printer.camera_source == "printer" and (driver := manager.driver(printer.id)):
+                if manager.status(printer.id).state == PrinterState.OFFLINE:
+                    return None
+                return await asyncio.wait_for(driver.snapshot(), timeout=15)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("photo %s: %s", printer.name, exc)
         return None
+
+    async def image_url(self, printer: Printer, data: bytes | None, name: str) -> str | None:
+        """Where a notification finds the photo. Without a photo, no image at all: a link
+        that does not load shows an error on the phone."""
+        if not data:
+            return None
+        if url := await publisher.photo_url(printer, data):
+            return url  # camera entity published through MQTT
+        if config.ha_www_dir:
+            (config.ha_www_dir / f"{name}.jpg").write_bytes(data)
+            return f"/local/printy/{name}.jpg?v={int(time.time())}"
+        return None
+
+    async def capture(self, job: Job, data: bytes | None = None) -> str | None:
+        """Takes (or uses) a bed photo for the job; returns the notification image."""
+        if data is None:
+            data = await self.photo(job.printer)
+        if data:
+            (SNAPSHOT_DIR / f"job-{job.id}.jpg").write_bytes(data)
+        return await self.image_url(job.printer, data, f"job-{job.id}")
 
     # -- launch and follow ----------------------------------------------------
 
     async def _launch(self, job_id: int) -> None:
         try:
+            await self._keep_empty_bed(job_id)
             await self._send_file(job_id)
         finally:
             self._launching.discard(job_id)
             self.poke()
+
+    async def _keep_empty_bed(self, job_id: int) -> None:
+        """Right before a confirmed print the bed is empty: its photo is the reference."""
+        try:
+            with SessionLocal() as s:
+                job = s.get(Job, job_id)
+                if job is None or job.confirmed_at is None:
+                    return
+                printer = job.printer
+                data = await self.photo(printer)
+            if data:
+                bedcheck.save_reference(printer.id, data)
+        except Exception as exc:  # noqa: BLE001 - never blocks the launch
+            log.debug("empty bed photo: %s", exc)
 
     async def _send_file(self, job_id: int) -> None:
         with SessionLocal() as s:
@@ -571,6 +623,45 @@ class Scheduler:
             actions=actions,
             tag="printy-spools",
         )
+
+    # -- forgotten piece -------------------------------------------------------
+
+    async def _bed_reminder(self, s: Session, opts: dict) -> None:
+        """A finished piece was never declared removed and the next print comes soon."""
+        if not opts.get("bed_reminder", True):
+            return
+        now = utcnow()
+        for printer in s.query(Printer).all():
+            finished = printer.last_finished_at
+            if finished is None or printer.bed_clear or now - finished < timedelta(minutes=30):
+                continue
+            if printer.bed_reminded_at is not None and printer.bed_reminded_at >= finished:
+                continue  # one reminder per finished print
+            nxt = s.scalar(
+                select(Job)
+                .where(Job.printer_id == printer.id, Job.status == JobStatus.SCHEDULED.value)
+                .order_by(Job.start_at)
+                .limit(1)
+            )
+            if nxt is None or nxt.start_at - now > BED_REMINDER_BEFORE or manager.status(printer.id).active:
+                continue
+            printer.bed_reminded_at = now
+            data = await self.photo(printer)
+            verdict = bedcheck.verdict(printer.id, data)
+            local_start = nxt.start_at.astimezone(config.timezone).strftime("%H:%M")
+            message = f"{nxt.sliced_file.model.name} est prévue à {local_start}. "
+            if verdict == "empty":
+                message += "La photo montre un plateau vide : touche « Plateau vidé » si la pièce a bien été retirée."
+            else:
+                message += "Retire la pièce, puis touche « Plateau vidé ». " + bedcheck.sentence(verdict)
+            await ha.notify(
+                opts["notify_targets"],
+                f"{printer.name} : pièce encore sur le plateau ?",
+                message.strip(),
+                image=await self.image_url(printer, data, f"printer-{printer.id}"),
+                tag=f"printy-printer-{printer.id}",
+                actions=[NotifyAction(f"PRINTY_BEDCLEAR_{printer.id}", "Plateau vidé")],
+            )
 
     # -- filament consumption -----------------------------------------------
 

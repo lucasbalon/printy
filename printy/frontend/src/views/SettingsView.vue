@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { AlertTriangle, ChevronRight, Copy, Plus, X } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { api } from "../api";
+import { api, urls } from "../api";
 import { attempt, loadEntities, loadSettings, loadSpools, state, toast } from "../store";
 import { applyTheme, theme } from "../theme";
 import type { OffPeakRange, Settings } from "../types";
@@ -240,6 +240,14 @@ async function rotateKey() {
             </div>
           </div>
           <p class="small muted">L’heure d’allumage se règle par imprimante : fiche de l’imprimante, « Allumer avant ».</p>
+          <label class="switch">
+            <input type="checkbox" :checked="s.bed_reminder" @change="save({ bed_reminder: ($event.target as HTMLInputElement).checked })" />
+            <span class="switch__track" aria-hidden="true" />
+            <span class="switch__text">
+              <span>Rappeler une pièce oubliée sur le plateau</span>
+              <small>2 h avant la prochaine impression, si la précédente n’a pas été déclarée retirée.</small>
+            </span>
+          </label>
         </div>
       </section>
 
@@ -361,6 +369,23 @@ async function rotateKey() {
             <p class="small muted">Au lancement, Printy demande toujours de confirmer le changement de bobine, quels que soient ces réglages.</p>
           </div>
           <p class="small muted">Laisse vide pour désactiver. Avec l’add-on Spoolman de Home Assistant, l’adresse est celle de ton Home Assistant suivie du port de Spoolman (7912 par défaut).</p>
+        </div>
+      </section>
+
+      <!-- Backup -->
+      <section class="panel group">
+        <div class="group__intro">
+          <h2>Sauvegarde</h2>
+          <p class="muted small">Planning, historique, stock et réglages.</p>
+        </div>
+        <div class="group__body">
+          <p class="small">
+            Printy fait partie des sauvegardes de Home Assistant (Paramètres, Système, Sauvegardes). Les fichiers de la
+            bibliothèque sont dans le dossier <span class="mono">share/printy</span> : coche « Share » pour les inclure.
+          </p>
+          <div class="row">
+            <a class="btn btn--secondary" :href="urls.backup" download>Exporter la base de données</a>
+          </div>
         </div>
       </section>
 
