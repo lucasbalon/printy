@@ -15,6 +15,7 @@ from .. import scheduler as sched
 from .. import settings as settings_store
 from ..config import config
 from ..db import get_session, utcnow
+from ..ha import ha
 from ..models import CLOSED_STATUSES, OPEN_STATUSES, Job, JobStatus, Printer, SlicedFile
 from ..printers import manager
 from ..scheduler import SNAPSHOT_DIR, add_event, scheduler
@@ -41,7 +42,7 @@ def _overlap(s: Session, printer_id: int, start: datetime, duration_s: int, excl
         select(Job).where(Job.printer_id == printer_id, Job.status.in_([st.value for st in OPEN_STATUSES]))
     ):
         other_end = other.end_at
-        if other.status in (JobStatus.PRINTING, JobStatus.PAUSED) and (w := manager.print_window(printer_id)):
+        if other.status in (JobStatus.PRINTING, JobStatus.PAUSED) and (w := manager.print_window(printer_id)) and w[1]:
             other_end = max(other_end, w[1])  # the printer knows better than the slicer
         if other.id != exclude and other.start_at < end and start < other_end:
             return other
@@ -56,9 +57,12 @@ def _check_slot(s: Session, printer_id: int, start: datetime, duration_s: int, e
             Job.status.in_([JobStatus.PRINTING.value, JobStatus.PAUSED.value, JobStatus.STARTING.value]),
         )
     )
-    if window and not running_ours and start < window[1]:
+    # end not known yet (the printer is heating): at least the next hour is taken
+    if window and not running_ours and start < (window[1] or utcnow() + timedelta(hours=1)):
         st = manager.status(printer_id)
         name = (st.file or "une impression").rsplit("/", 1)[-1]
+        if window[1] is None:
+            raise HTTPException(409, f"L’imprimante démarre « {name} » : sa fin n’est pas encore connue.")
         end = window[1].astimezone(config.timezone).strftime("%H:%M")
         raise HTTPException(409, f"L’imprimante est occupée par « {name} » jusque vers {end}.")
     if other := _overlap(s, printer_id, start, duration_s, exclude):
@@ -104,7 +108,7 @@ async def preview(body: PreviewIn, s: DB):
         if j.id != body.exclude_job_id
     ]
     if w := manager.print_window(body.printer_id):
-        busy.append(w)
+        busy.append((w[0], w[1] or now + timedelta(hours=1)))
     slot = offpeak.best_slot(settings_store.get(s, "off_peak") or [], duration, busy, now)
     out: dict = {"off_peak": {"start_at": slot[0].isoformat(), "share": slot[1]} if slot else None}
     if body.spool_id is not None:
@@ -112,7 +116,7 @@ async def preview(body: PreviewIn, s: DB):
             id=-1, printer_id=body.printer_id, spool_id=body.spool_id,
             start_at=max(body.start_at or now, now), sliced_file=SimpleNamespace(filament_g=f.filament_g),
         )
-        info = (await _filament(s, [virtual]))[-1]
+        info = (await _filament(s, [virtual]))[-1]  # also applies the margin settings
         out |= {
             "spool_change": info.spool_change,
             "previous_spool_id": info.previous_spool_id,
@@ -136,7 +140,7 @@ async def list_jobs(s: DB, start: AwareDatetime | None = None, end: AwareDatetim
     # planned prints that would start while the printer is still busy
     busy_until: dict[int, datetime] = {}
     for j in jobs:
-        if j.printer_id not in busy_until and (w := manager.print_window(j.printer_id)):
+        if j.printer_id not in busy_until and (w := manager.print_window(j.printer_id)) and w[1]:
             busy_until[j.printer_id] = w[1]
     for data, j in zip(out, jobs, strict=True):
         until = busy_until.get(j.printer_id)
@@ -295,7 +299,7 @@ def start_now(job_id: int, s: DB):
 
 
 @router.post("/jobs/{job_id}/snooze")
-def snooze_job(job_id: int, s: DB, minutes: int = 60):
+def snooze_job(job_id: int, s: DB, minutes: int | None = None):
     job = _get(s, job_id)
     if JobStatus(job.status) not in MOVABLE | {JobStatus.READY}:
         raise HTTPException(409, "Cette impression ne peut plus être reportée.")
@@ -325,14 +329,19 @@ async def cancel_job(job_id: int, s: DB):
 
 
 @router.delete("/jobs/{job_id}", status_code=204)
-def delete_job(job_id: int, s: DB):
+async def delete_job(job_id: int, s: DB):
+    """A print not started yet is deleted (no trace); a closed one leaves the history."""
     job = s.get(Job, job_id)
     if job is None:
         return
-    if JobStatus(job.status) not in CLOSED_STATUSES | {JobStatus.SCHEDULED, JobStatus.NEEDS_ATTENTION}:
-        raise HTTPException(409, "Annule d’abord cette impression.")
-    s.delete(job)
+    try:
+        sched.remove(s, job)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     s.commit()
+    # a pending confirmation request would keep its buttons on the phone
+    await ha.clear(settings_store.get(s, "notify_targets") or [], f"printy-job-{job_id}")
+    scheduler.poke()
 
 
 @router.get("/jobs/{job_id}/snapshot")

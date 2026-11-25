@@ -19,7 +19,23 @@ log = logging.getLogger(__name__)
 CACHE_S = 30
 # g/cm3, needed by Spoolman to turn lengths into weights
 DENSITY = {"PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "ASA": 1.07, "TPU": 1.21, "PC": 1.20, "PA": 1.14}
-LOW_MARGIN = 1.05  # need 5 % more than the slicer estimate
+
+
+@dataclass
+class FilamentLimits:
+    """How much filament a print really needs (settings, applied by settings.get_all)."""
+
+    margin_pct: float = 5.0  # on top of the slicer's estimate
+    reserve_g: float = 0.0  # left on the spool core, never usable
+
+    def need(self, grams: float) -> float:
+        return grams * (1 + self.margin_pct / 100)
+
+    def usable(self, remaining_g: float) -> float:
+        return remaining_g - self.reserve_g
+
+
+limits = FilamentLimits()
 GOOD_MATCH = 18.0  # CIE76 distance under which two colours read as "the same"
 
 
@@ -242,10 +258,10 @@ def suggest(
         return None
     best = ranked[0][1]
     same = [sp for sp, score in ranked if score <= GOOD_MATCH and score - best < 8]
-    need = (need_g or 0) * LOW_MARGIN
+    need = limits.need(need_g or 0)
 
     def enough(sp: Spool) -> bool:
-        return sp.remaining_g is None or sp.remaining_g >= need
+        return sp.remaining_g is None or limits.usable(sp.remaining_g) >= need
 
     loaded = next((sp for sp in same if sp.id == loaded_id), None)
     if loaded and enough(loaded):
@@ -295,7 +311,7 @@ def plan(jobs: list[Any], loaded: dict[int, int | None], spools: list[Spool]) ->
             if left is not None:
                 info.remaining_before_g = round(left, 1)
                 if need:
-                    info.low_filament = left < need * LOW_MARGIN
+                    info.low_filament = limits.usable(left) < limits.need(need)
                     remaining[job.spool_id] = left - need
         out[job.id] = info
     return out

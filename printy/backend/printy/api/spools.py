@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
+from .. import offpeak, production
 from .. import settings as settings_store
-from ..db import get_session
-from ..models import OPEN_STATUSES, Job, Printer
+from ..db import get_session, utcnow
+from ..models import OPEN_STATUSES, Job, Model, Printer, SlicedFile
 from ..printers import manager
-from ..scheduler import scheduler
-from ..spoolman import GOOD_MATCH, SpoolmanError, rank_spools, spoolman, suggest
+from ..scheduler import add_event, scheduler
+from ..spoolfinish import Candidate, proposals, rule_tags
+from ..spoolman import GOOD_MATCH, Spool, SpoolmanError, color_distance, limits, rank_spools, spoolman, suggest
 from . import serialize
 
 router = APIRouter(tags=["spools"])
@@ -143,3 +146,129 @@ def set_loaded_spool(printer_id: int, body: LoadedSpool, s: DB):
     manager.want_spool(p.id, body.spool_id)
     scheduler.poke()
     return serialize.printer(p)
+
+
+# -- finishing a spool --------------------------------------------------------------
+
+
+def _candidates(s: Session, tag: str, spool: Spool) -> list[Candidate]:
+    """Printable versions of the tag's models that suit the spool's material."""
+    out: list[Candidate] = []
+    models = s.scalars(select(Model).options(selectinload(Model.sliced))).all()
+    for m in models:
+        if tag not in (m.tags or []):
+            continue
+        # stock in the spool's colour (the variant a print on this spool would produce)
+        items = production.stock_of(s, m.id)
+        same = [
+            i for i in items
+            if i.variant == spool.name or (i.color and spool.color and color_distance(i.color, spool.color) <= GOOD_MATCH)
+        ]
+        stock = sum(i.quantity for i in same)
+        versions = [
+            v for v in m.sliced
+            if v.filament_g and (not v.material or not spool.material or v.material.lower() == spool.material.lower())
+        ]
+        for v in versions:
+            label = ", ".join(x for x in (v.printer_model, f"{v.layer_height} mm" if v.layer_height else None) if x)
+            out.append(Candidate(
+                sliced_id=v.id, model_id=m.id, model_name=m.name, label=label if len(versions) > 1 else "",
+                filament_g=v.filament_g, pieces=max(1, v.pieces or 1), duration_s=v.duration_s or 3600,
+                stock=stock, alert=m.stock_alert,
+            ))
+    return out
+
+
+async def _spool_and_available(s: Session, spool_id: int) -> tuple[Spool, float, float]:
+    settings_store.get_all(s)
+    if not spoolman.enabled:
+        raise HTTPException(409, "Spoolman n’est pas configuré.")
+    try:
+        spool = next((sp for sp in await spoolman.spools() if sp.id == spool_id), None)
+    except SpoolmanError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if spool is None:
+        raise HTTPException(404, "Bobine introuvable dans Spoolman.")
+    if spool.remaining_g is None:
+        raise HTTPException(409, "Spoolman ne connaît pas le poids restant de cette bobine.")
+    planned = sum(
+        (j.sliced_file.filament_g or 0)
+        for j in s.scalars(
+            select(Job).where(Job.spool_id == spool_id, Job.status.in_([st.value for st in OPEN_STATUSES]))
+        )
+    )
+    return spool, limits.usable(spool.remaining_g) - planned, planned
+
+
+@router.get("/spools/{spool_id}/finish")
+async def finish_spool(spool_id: int, s: DB, tag: str | None = None):
+    """Best combinations of prints to use up a spool (suggestions only)."""
+    spool, available, planned = await _spool_and_available(s, spool_id)
+    suggested = rule_tags(settings_store.get(s, "tag_rules") or [], spool)
+    tag = tag or (suggested[0] if suggested else None)
+    cands = _candidates(s, tag, spool) if tag else []
+    return {
+        "spool": spool.to_dict(),
+        "remaining_g": spool.remaining_g,
+        "reserve_g": limits.reserve_g,
+        "margin_pct": limits.margin_pct,
+        "planned_g": round(planned, 1),
+        "available_g": round(available, 1),
+        "tag": tag,
+        "suggested_tags": suggested,
+        "candidates": len(cands),
+        "proposals": proposals(cands, available),
+    }
+
+
+class FinishItem(BaseModel):
+    sliced_id: int
+    count: int = Field(ge=1, le=20)
+
+
+class FinishPlan(BaseModel):
+    printer_id: int
+    items: list[FinishItem] = Field(min_length=1)
+
+
+@router.post("/spools/{spool_id}/finish/plan", status_code=201)
+async def plan_finish(spool_id: int, body: FinishPlan, s: DB):
+    """Plans the chosen prints one after another on this spool, in off-peak hours when
+    possible; each still asks for the bed confirmation as usual."""
+    spool, _, _ = await _spool_and_available(s, spool_id)
+    if s.get(Printer, body.printer_id) is None:
+        raise HTTPException(404, "Imprimante introuvable.")
+    files = []
+    for it in body.items:
+        f = s.get(SlicedFile, it.sliced_id)
+        if f is None:
+            raise HTTPException(404, "Fichier introuvable.")
+        files += [f] * it.count
+    files.sort(key=lambda f: -(f.filament_g or 0))  # the largest first
+    now = utcnow()
+    busy = [
+        (j.start_at, j.end_at)
+        for j in s.scalars(
+            select(Job).where(Job.printer_id == body.printer_id, Job.status.in_([st.value for st in OPEN_STATUSES]))
+        )
+    ]
+    if w := manager.print_window(body.printer_id):
+        busy.append((w[0], w[1] or now + timedelta(hours=1)))
+    ranges = settings_store.get(s, "off_peak") or []
+    confirm = bool(settings_store.get(s, "confirm_by_default"))
+    created = []
+    for f in files:
+        duration = timedelta(seconds=f.duration_s or 3600)
+        slot = offpeak.best_slot(ranges, duration, busy, now)
+        start = slot[0] if slot else offpeak.first_free(duration, busy, now)
+        job = Job(
+            sliced_file=f, printer_id=body.printer_id, start_at=start, duration_s=int(duration.total_seconds()),
+            confirm_required=confirm, spool_id=spool.id, note="Fin de bobine",
+        )
+        add_event(job, "created", f"Planifiée pour finir {spool.label}.")
+        s.add(job)
+        busy.append((start, start + duration))
+        created.append(job)
+    s.commit()
+    scheduler.poke()
+    return [serialize.job(j) for j in created]

@@ -107,6 +107,41 @@ def test_unanswered_early_confirmation_still_powers_on(monkeypatch):
         loop.close()
 
 
+def test_unanswered_confirmation_is_sent_again_then_flagged(monkeypatch):
+    """The phone may have been offline: one reminder at the start time, then the print
+    needs attention and the phone is told."""
+    init_db()
+    client = TestClient(app)
+    sent, jid, switch = _env(monkeypatch, client, "relance", 10)
+    loop = asyncio.new_event_loop()
+    try:
+        _start_in(jid, 3)
+        loop.run_until_complete(_step())
+        assert _status(jid) == "awaiting_confirmation" and len(sent) == 1
+        loop.run_until_complete(_step())
+        assert len(sent) == 1  # not yet
+        _start_in(jid, -1)  # start time passed, but asked only just now: not twice in a row
+        loop.run_until_complete(_step())
+        assert len(sent) == 1
+        with SessionLocal() as s:  # half of the 15 min answer delay has gone by
+            s.get(Job, jid).notified_at = utcnow() - timedelta(minutes=8)
+            s.commit()
+        loop.run_until_complete(_step())
+        loop.run_until_complete(_step())
+        assert len(sent) == 2 and sent[-1].startswith("Rappel")  # sent once more, only once
+        with SessionLocal() as s:  # past the answer deadline (15 min after the start)
+            job = s.get(Job, jid)
+            job.start_at = utcnow() - timedelta(minutes=16)
+            job.notified_at = utcnow() - timedelta(minutes=20)
+            s.commit()
+        loop.run_until_complete(_step())
+        assert _status(jid) == "needs_attention"
+        assert len(sent) == 3 and "à revoir" in sent[-1]
+    finally:
+        client.patch("/api/v1/settings", json={"confirm_lead_min": 10})
+        loop.close()
+
+
 def test_confirmation_after_power_on(monkeypatch):
     init_db()
     client = TestClient(app)

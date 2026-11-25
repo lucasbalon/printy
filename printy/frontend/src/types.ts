@@ -211,6 +211,49 @@ export interface Spool {
   planned_g?: number;
 }
 
+export interface TagRule {
+  tag: string;
+  material: string | null;
+  color: string | null;
+}
+
+export interface FinishItem {
+  sliced_id: number;
+  model_id: number;
+  model_name: string;
+  label: string;
+  count: number;
+  filament_g: number;
+  pieces: number;
+  stock: number;
+  alert: number | null;
+  under_alert: boolean;
+}
+
+export interface FinishProposal {
+  kind: "reste" | "stock";
+  items: FinishItem[];
+  prints: number;
+  used_g: number;
+  leftover_g: number;
+  margin_g: number;
+  duration_s: number;
+  also_stock?: boolean;
+}
+
+export interface FinishResult {
+  spool: Spool;
+  remaining_g: number;
+  reserve_g: number;
+  margin_pct: number;
+  planned_g: number;
+  available_g: number;
+  tag: string | null;
+  suggested_tags: string[];
+  candidates: number;
+  proposals: FinishProposal[];
+}
+
 export interface SpoolList {
   enabled: boolean;
   error: string | null;
@@ -229,6 +272,21 @@ export interface Settings {
   confirm_by_default: boolean;
   confirm_lead_min: number;
   bed_reminder: boolean;
+  tag_rules: TagRule[];
+  filament_margin_pct: number;
+  spool_reserve_g: number;
+  snooze_min: number;
+  bed_reminder_hours: number;
+  bed_reminder_after_min: number;
+  bed_photo_threshold_pct: number;
+  offpeak_horizon_days: number;
+  finish_max_prints: number;
+  finish_stock_slack_g: number;
+  boot_settle_min: number;
+  offline_grace_min: number;
+  launch_timeout_min: number;
+  start_grace_min: number;
+  busy_grace_min: number;
   confirm_timeout_min: number;
   keep_on_window_min: number;
   off_peak: OffPeakRange[];

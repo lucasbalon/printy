@@ -23,7 +23,7 @@ REF_DIR.mkdir(parents=True, exist_ok=True)
 
 SIZE = (96, 72)
 PIXEL_DELTA = 1.2  # a pixel "changed" beyond this many standard deviations
-OCCUPIED_SHARE = 0.03  # more than 3 % of changed pixels: something is on the bed
+# beyond settings.tune.bed_photo_threshold_pct of changed pixels: something is on the bed
 
 
 def _ref_path(printer_id: int) -> Path:
@@ -71,7 +71,9 @@ def verdict(printer_id: int, data: bytes | None) -> str | None:
     if share is None:
         return None
     log.info("bed check printer %s: %.1f %% changed", printer_id, share * 100)
-    return "occupied" if share > OCCUPIED_SHARE else "empty"
+    from .settings import tune
+
+    return "occupied" if share * 100 > tune.bed_photo_threshold_pct else "empty"
 
 
 def sentence(v: str | None) -> str:

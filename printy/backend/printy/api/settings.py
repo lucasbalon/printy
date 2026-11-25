@@ -48,10 +48,31 @@ class OffPeak(BaseModel):
     end: str
 
 
+class TagRule(BaseModel):
+    tag: str = Field(min_length=1, max_length=60)
+    material: str | None = None
+    color: str | None = None
+
+
 class SettingsPatch(BaseModel):
     notify_targets: list[str] | None = None
     confirm_by_default: bool | None = None
     bed_reminder: bool | None = None
+    tag_rules: list[TagRule] | None = None
+    filament_margin_pct: float | None = Field(None, ge=0, le=30)
+    spool_reserve_g: float | None = Field(None, ge=0, le=200)
+    snooze_min: int | None = Field(None, ge=5, le=720)
+    bed_reminder_hours: float | None = Field(None, ge=0.5, le=24)
+    bed_reminder_after_min: int | None = Field(None, ge=0, le=240)
+    bed_photo_threshold_pct: float | None = Field(None, ge=0.5, le=50)
+    offpeak_horizon_days: int | None = Field(None, ge=1, le=14)
+    finish_max_prints: int | None = Field(None, ge=1, le=30)
+    finish_stock_slack_g: float | None = Field(None, ge=0, le=500)
+    boot_settle_min: float | None = Field(None, ge=0, le=15)
+    offline_grace_min: int | None = Field(None, ge=1, le=60)
+    launch_timeout_min: int | None = Field(None, ge=1, le=60)
+    start_grace_min: int | None = Field(None, ge=1, le=60)
+    busy_grace_min: int | None = Field(None, ge=1, le=180)
     confirm_lead_min: int | None = Field(None, ge=0, le=720)
     confirm_timeout_min: int | None = Field(None, ge=5, le=240)
     keep_on_window_min: int | None = Field(None, ge=0, le=240)

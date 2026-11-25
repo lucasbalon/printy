@@ -3,6 +3,7 @@ import { ExternalLink, Plus } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../api";
+import FinishSpoolSheet from "../components/FinishSpoolSheet.vue";
 import NewSpoolSheet from "../components/NewSpoolSheet.vue";
 import { grams } from "../format";
 import { attempt, loadSettings, loadSpools, state, toast, usePolling } from "../store";
@@ -71,6 +72,14 @@ async function onCreated(created: Spool[]) {
   sheetOpen.value = false;
   toast(created.length > 1 ? `${created.length} bobines ajoutées dans Spoolman.` : "Bobine ajoutée dans Spoolman.");
   await attempt(() => loadSpools(true));
+}
+
+// finishing a spool with the prints that leave the least on it
+const finishId = ref<number | null>(null);
+const finishOpen = ref(false);
+function openFinish(sp: Spool) {
+  finishId.value = sp.id;
+  finishOpen.value = true;
 }
 
 async function archive(sp: Spool) {
@@ -152,7 +161,10 @@ async function archive(sp: Spool) {
                 <span v-if="sp.planned_g" class="muted">{{ grams(sp.planned_g) }} prévus</span>
                 <span v-if="sp.location" class="muted">{{ sp.location }}</span>
               </span>
-              <button type="button" class="btn btn--ghost btn--sm" @click="archive(sp)">Vide</button>
+              <span class="spool__actions">
+                <button v-if="sp.remaining_g" type="button" class="btn btn--ghost btn--sm" @click="openFinish(sp)">Finir</button>
+                <button type="button" class="btn btn--ghost btn--sm" @click="archive(sp)">Vide</button>
+              </span>
             </li>
           </ul>
 
@@ -164,6 +176,12 @@ async function archive(sp: Spool) {
     </template>
 
     <NewSpoolSheet :open="sheetOpen" :filament-id="presetFilament" @close="sheetOpen = false" @created="onCreated" />
+    <FinishSpoolSheet
+      :open="finishOpen"
+      :spool-id="finishId"
+      @close="finishOpen = false"
+      @planned="finishOpen = false; attempt(() => loadSpools(true))"
+    />
   </div>
 </template>
 
@@ -179,11 +197,12 @@ async function archive(sp: Spool) {
 .spool { display: grid; grid-template-columns: auto minmax(90px, 1fr) auto auto; align-items: center; gap: var(--space-sm); min-height: 44px; border-bottom: var(--rule-hair) solid var(--color-rule); }
 .spool__id { font-size: var(--text-sm); color: var(--color-muted); }
 .spool__gauge { display: grid; grid-template-columns: minmax(40px, 1fr) auto; align-items: center; gap: var(--space-xs); }
+.spool__actions { display: flex; gap: var(--space-3xs); }
 .spool__tags { display: flex; flex-wrap: wrap; gap: var(--space-3xs) var(--space-xs); justify-content: flex-end; }
 .group__add { justify-self: start; }
 @media (max-width: 40rem) {
   .spool { grid-template-columns: auto minmax(0, 1fr) auto; }
-  .spool > .btn { grid-column: 3; grid-row: 1; }
+  .spool > .spool__actions { grid-column: 3; grid-row: 1; }
   .spool__tags { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; padding-bottom: var(--space-xs); }
 }
 </style>

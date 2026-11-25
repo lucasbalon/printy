@@ -21,15 +21,18 @@ l'imprimante refroidie.
 | Moment | Ce que fait Printy |
 |---|---|
 | Début − délai d'allumage (10 min par défaut, réglé par imprimante) | Allume la prise, attend que l'imprimante réponde |
-| Début − délai de confirmation (10 min par défaut, dans les réglages) | Envoie une notification avec photo : **Lancer**, **Reporter d'1 h**, **Annuler** |
+| Début − délai de confirmation (10 min par défaut, dans les réglages) | Envoie une notification avec photo : **Lancer**, **Reporter** (1 h par défaut), **Annuler** |
 | Heure prévue, confirmée | Envoie le fichier et lance l'impression |
 | Fin | Notification « Impression terminée » avec le bouton **Plateau vidé** |
 | Refroidissement | Coupe la prise quand buse et plateau sont sous 45 °C, sauf si une autre impression démarre dans les 30 min |
 
 - La confirmation peut partir avant l'allumage (par exemple la veille d'une impression
   de nuit) : la photo n'est alors possible qu'avec une caméra Home Assistant.
+- Sans réponse, la demande est renvoyée une fois à l'heure prévue (au plus tôt à
+  mi-délai), au cas où le téléphone était hors ligne.
 - Sans réponse 15 min après l'heure prévue, l'impression passe **à revoir**, n'est pas
-  lancée et la prise est coupée une fois l'imprimante froide.
+  lancée et la prise est coupée une fois l'imprimante froide. Une notification le
+  signale, comme pour toute impression qui passe à revoir.
 - Toucher **Plateau vidé** à la fin d'une impression vaut confirmation pour la suivante.
 - La confirmation peut être désactivée par impression ; un avertissement le rappelle.
 - Printy ne coupe la prise qu'après une impression qu'il a lui-même lancée,
@@ -38,11 +41,20 @@ l'imprimante refroidie.
   l'instant : si elle ne répond pas, est chaude ou imprime, la prise reste allumée.
   La carte de l'imprimante affiche la coupure prévue, avec **Laisser allumée**.
 - **Pièce oubliée** (désactivable dans les réglages) : si une pièce terminée n'a pas
-  été déclarée retirée 2 h avant la prochaine impression, Printy envoie un rappel.
+  été déclarée retirée 2 h avant la prochaine impression (réglable), Printy envoie un rappel.
 - **Photo du plateau** : juste avant chaque impression confirmée, Printy garde une
   photo du plateau vide. Les photos suivantes lui sont comparées et la notification
   indique si le plateau semble vide ou occupé. Ce n'est qu'une indication : la
   décision reste la tienne.
+
+## Réglages chiffrés
+
+Toutes les valeurs que Printy utilise sont visibles et modifiables dans **Réglages** :
+délais de confirmation, de rappel et de report à côté de « Avant chaque impression »,
+marge et réserve de filament et réglages de fin de bobine dans « Spoolman », horizon
+des heures creuses dans « Heures creuses », et dans **Réglages avancés** les délais
+techniques (démarrage de l'imprimante, chauffe et calibrage tolérés, envoi du fichier,
+imprimante muette). Les valeurs par défaut conviennent à un K2.
 
 ## Notifications sur iPhone
 
@@ -59,10 +71,14 @@ l'imprimante refroidie.
 - **Commencer à** ou **Prête pour** : donne l'heure de début, ou l'heure à laquelle
   la pièce doit être prête ; Printy calcule l'autre à partir de la durée.
 - **Heures creuses** : le bouton place l'impression dans le premier créneau libre
-  qui en profite le plus (dans les 3 jours).
+  qui en profite le plus (dans les 3 jours, réglable).
 - Le changement de bobine et le filament insuffisant sont signalés dès la
   planification, en tenant compte des impressions déjà prévues avant. Le filament
   insuffisant ne bloque pas.
+- **Supprimer** une impression pas encore lancée l'efface sans trace (aussi depuis le
+  bouton « Annuler » de la notification) ; si Printy avait allumé l'imprimante pour
+  elle, la prise est recoupée une fois l'imprimante froide. Une impression envoyée à
+  l'imprimante s'annule ou s'arrête, et reste dans l'historique.
 
 ## Sauvegarde
 
@@ -178,6 +194,19 @@ prévu par les impressions planifiées. **Ouvrir Spoolman** l'ouvre à part.
   imprimante.
 - **Une bobine de plus** sur un filament : la même, en un clic.
 - **Vide** : archive la bobine dans Spoolman.
+- **Finir** (aussi « Finir cette bobine » sur la carte de l'imprimante) : une bobine ne
+  se change pas en cours d'impression, sa fin est donc perdue si les dernières
+  impressions ne tombent pas juste. Choisis une étiquette (par exemple « abat-jour ») :
+  Printy cherche les combinaisons d'impressions de ces modèles qui laissent le moins de
+  filament, en tenant compte de ce qui est déjà prévu sur la bobine, d'une marge par
+  impression (5 % par défaut) et d'une réserve en fin de bobine (0 g par défaut), toutes
+  deux réglables dans **Réglages → Spoolman** et appliquées aussi aux alertes de
+  filament insuffisant. Deux propositions : **le moins de reste**, et **le plus utile
+  pour le stock** (modèles sous leur seuil d'alerte, ou les moins en stock dans cette
+  couleur). **Planifier ces impressions** les place l'une après l'autre, en heures
+  creuses si possible. L'étiquette peut être retenue pour un type de bobine (matière
+  et couleur, pas une bobine précise) : elle sera proposée d'office, sans rien
+  empêcher d'autre. La liste se gère dans **Réglages → Spoolman**.
 
 **Quelle bobine Printy choisit** pour une impression, parmi celles de la bonne couleur et
 de la bonne matière : celle déjà montée sur l'imprimante si elle a assez de filament ;

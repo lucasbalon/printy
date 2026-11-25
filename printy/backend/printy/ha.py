@@ -174,9 +174,9 @@ class HomeAssistant:
             data["url"] = panel  # iOS
             data["clickAction"] = panel  # Android
         if urgent:
-            # iOS: shown even in a Focus mode; Android: high priority
+            # iOS: shown even in a Focus mode; Android: high priority. No "ttl": 0, which
+            # tells Android to drop the notification when the phone is unreachable.
             data["push"] = {"interruption-level": "time-sensitive"}
-            data["ttl"] = 0
             data["priority"] = "high"
         if actions:
             data["actions"] = [
@@ -198,6 +198,20 @@ class HomeAssistant:
                 r.raise_for_status()
             except httpx.HTTPError as exc:
                 log.warning("notification to %s failed: %s", target, exc)
+
+    async def clear(self, targets: list[str], tag: str) -> None:
+        """Removes a notification (and its buttons) from the phones."""
+        if not self.enabled:
+            return
+        for target in targets:
+            domain, _, service = target.partition(".")
+            try:
+                r = await self._http.post(
+                    f"/services/{domain}/{service}", json={"message": "clear_notification", "data": {"tag": tag}}
+                )
+                r.raise_for_status()
+            except httpx.HTTPError as exc:
+                log.debug("clear notification on %s: %s", target, exc)
 
     def listen_actions(self, handler: ActionHandler) -> None:
         """Calls handler(action) for each tapped notification button."""

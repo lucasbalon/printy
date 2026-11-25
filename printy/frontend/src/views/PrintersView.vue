@@ -3,6 +3,7 @@ import { Camera, Plus, RefreshCw, Settings2 } from "lucide-vue-next";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api, urls } from "../api";
+import FinishSpoolSheet from "../components/FinishSpoolSheet.vue";
 import PrinterSheet from "../components/PrinterSheet.vue";
 import SpoolPicker from "../components/SpoolPicker.vue";
 import StatusTag from "../components/StatusTag.vue";
@@ -83,6 +84,13 @@ async function setLoaded(p: Printer, id: number | null) {
   await attempt(() => api.post(`/printers/${p.id}/spool`, { spool_id: id }), id ? "Bobine chargée mise à jour." : "Bobine retirée.");
   attempt(loadPrinters);
 }
+const finishId = ref<number | null>(null);
+const finishOpen = ref(false);
+function openFinish(p: Printer) {
+  finishId.value = p.loaded_spool_id;
+  finishOpen.value = true;
+}
+
 async function keepOn(p: Printer) {
   await attempt(() => api.post(`/printers/${p.id}/keep-on`), "La prise restera allumée.");
   attempt(loadPrinters);
@@ -192,6 +200,7 @@ async function bedClear(p: Printer) {
             />
             <span class="field__help">
               {{ p.live.spool_tracked ? "Synchronisée avec Klipper : la consommation est déduite par l’imprimante." : "" }}
+              <button v-if="p.loaded_spool_id" type="button" class="linkbtn" @click="openFinish(p)">Finir cette bobine</button>
               <RouterLink to="/bobines">Gérer les bobines</RouterLink>
             </span>
           </div>
@@ -233,6 +242,7 @@ async function bedClear(p: Printer) {
       </li>
     </ul>
 
+    <FinishSpoolSheet :open="finishOpen" :spool-id="finishId" @close="finishOpen = false" @planned="finishOpen = false" />
     <PrinterSheet :open="sheetOpen" :printer="editing" @close="sheetOpen = false" @saved="onSaved" @deleted="onDeleted" />
   </div>
 </template>
@@ -265,6 +275,7 @@ async function bedClear(p: Printer) {
 
 .printer__rows { display: grid; gap: var(--space-sm); }
 .power-off { display: flex; flex-wrap: wrap; gap: var(--space-xs); align-items: center; justify-content: space-between; padding: var(--space-xs) var(--space-sm); background: var(--color-paper-2); }
+.linkbtn { padding: 0; margin-right: var(--space-sm); border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
 .bed { display: flex; flex-wrap: wrap; gap: var(--space-xs); align-items: center; }
 .bed:empty { display: none; }
 </style>

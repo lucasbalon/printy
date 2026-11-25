@@ -110,7 +110,7 @@ def _window(printer_id: int) -> dict[str, Any]:
     w = manager.print_window(printer_id)
     return {
         "print_started_at": w[0].isoformat() if w else None,
-        "print_ends_at": w[1].isoformat() if w else None,
+        "print_ends_at": w[1].isoformat() if w and w[1] else None,
     }
 
 
@@ -145,7 +145,7 @@ def job(j: Job, *, events: bool = False, filament: Any = None) -> dict[str, Any]
         st = manager.status(j.printer_id)
         data["progress"] = st.progress
         data["remaining_s"] = st.remaining_s
-        if (w := manager.print_window(j.printer_id)) and st.remaining_s is not None:
+        if (w := manager.print_window(j.printer_id)) and w[1]:
             data["end_at"] = w[1].isoformat()  # live estimate from the printer
     if filament is not None:
         data["spool_change"] = filament.spool_change

@@ -2,6 +2,7 @@
 import { AlertTriangle, ChevronRight, Copy, Plus, X } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api, urls } from "../api";
+import SettingNumber from "../components/SettingNumber.vue";
 import { attempt, loadEntities, loadSettings, loadSpools, state, toast } from "../store";
 import { applyTheme, theme } from "../theme";
 import type { OffPeakRange, Settings } from "../types";
@@ -245,9 +246,22 @@ async function rotateKey() {
             <span class="switch__track" aria-hidden="true" />
             <span class="switch__text">
               <span>Rappeler une pièce oubliée sur le plateau</span>
-              <small>2 h avant la prochaine impression, si la précédente n’a pas été déclarée retirée.</small>
+              <small>Si la précédente impression n’a pas été déclarée retirée avant la suivante.</small>
             </span>
           </label>
+          <div v-if="s.bed_reminder" class="form-row">
+            <SettingNumber id="bed-hours" label="Rappel avant la suivante (h)" :value="s.bed_reminder_hours" :min="0.5" :max="24" :step="0.5"
+                           @save="(v) => saveSoon({ bed_reminder_hours: v })" />
+            <SettingNumber id="bed-after" label="Au plus tôt après la fin (min)" :value="s.bed_reminder_after_min" :min="0" :max="240"
+                           @save="(v) => saveSoon({ bed_reminder_after_min: v })" />
+          </div>
+          <div class="form-row">
+            <SettingNumber id="snooze" label="« Reporter » décale de (min)" :value="s.snooze_min" :min="5" :max="720" :step="5"
+                           help="Bouton de la notification et de l’impression." @save="(v) => saveSoon({ snooze_min: v })" />
+            <SettingNumber id="photo-thr" label="Plateau occupé si la photo change de plus de (%)" :value="s.bed_photo_threshold_pct"
+                           :min="0.5" :max="50" :step="0.5" help="Comparaison avec la photo du plateau vide. Plus bas : plus sensible."
+                           @save="(v) => saveSoon({ bed_photo_threshold_pct: v })" />
+          </div>
         </div>
       </section>
 
@@ -269,6 +283,10 @@ async function rotateKey() {
             </li>
           </ul>
           <div><button type="button" class="btn btn--ghost btn--sm" @click="addRange"><Plus aria-hidden="true" />Ajouter une plage</button></div>
+          <div class="form-row">
+            <SettingNumber id="hc-days" label="Chercher un créneau creux sur (jours)" :value="s.offpeak_horizon_days" :min="1" :max="14"
+                           help="Bouton « Heures creuses » et planification d’une fin de bobine." @save="(v) => saveSoon({ offpeak_horizon_days: v })" />
+          </div>
         </div>
       </section>
 
@@ -368,6 +386,40 @@ async function rotateKey() {
             </div>
             <p class="small muted">Au lancement, Printy demande toujours de confirmer le changement de bobine, quels que soient ces réglages.</p>
           </div>
+          <div class="form-row">
+            <div class="field">
+              <label for="fil-margin">Marge de filament par impression (%)</label>
+              <input id="fil-margin" class="input mono" type="number" min="0" max="30" step="1" :value="s.filament_margin_pct" inputmode="decimal"
+                     @change="saveSoon({ filament_margin_pct: Number(($event.target as HTMLInputElement).value) })" />
+              <span class="field__help">Ajoutée au poids annoncé par le trancheur avant de dire qu’une bobine suffit.</span>
+            </div>
+            <div class="field">
+              <label for="fil-reserve">Réserve en fin de bobine (g)</label>
+              <input id="fil-reserve" class="input mono" type="number" min="0" max="200" step="1" :value="s.spool_reserve_g" inputmode="decimal"
+                     @change="saveSoon({ spool_reserve_g: Number(($event.target as HTMLInputElement).value) })" />
+              <span class="field__help">Ce qui reste accroché au moyeu et ne peut pas être imprimé.</span>
+            </div>
+          </div>
+          <div class="form-row">
+            <SettingNumber id="fin-max" label="Finir une bobine : impressions au plus" :value="s.finish_max_prints" :min="1" :max="30"
+                           help="Par combinaison proposée." @save="(v) => saveSoon({ finish_max_prints: v })" />
+            <SettingNumber id="fin-slack" label="Reste en plus accepté pour le stock (g)" :value="s.finish_stock_slack_g" :min="0" :max="500"
+                           help="La proposition « stock » peut laisser jusqu’à ça de plus que la meilleure."
+                           @save="(v) => saveSoon({ finish_stock_slack_g: v })" />
+          </div>
+          <div v-if="s.tag_rules.length" class="field">
+            <span class="field__label">Pour finir une bobine, proposer</span>
+            <ul class="rules" role="list">
+              <li v-for="(r, i) in s.tag_rules" :key="i" class="rules__row small">
+                <span v-if="r.color" class="swatch" :style="{ background: r.color }" />
+                <span>« {{ r.tag }} » pour les bobines {{ r.material ?? "" }}{{ r.color ? " de cette couleur" : "" }}</span>
+                <button type="button" class="btn btn--ghost btn--sm" @click="save({ tag_rules: s.tag_rules.filter((_, j) => j !== i) }, 'Suggestion retirée.')">
+                  Retirer
+                </button>
+              </li>
+            </ul>
+            <span class="field__help">Se règle depuis « Finir » sur une bobine ; ce ne sont que des suggestions.</span>
+          </div>
           <p class="small muted">Laisse vide pour désactiver. Avec l’add-on Spoolman de Home Assistant, l’adresse est celle de ton Home Assistant suivie du port de Spoolman (7912 par défaut).</p>
         </div>
       </section>
@@ -453,7 +505,25 @@ async function rotateKey() {
                      @change="saveSoon({ keep_on_window_min: Number(($event.target as HTMLInputElement).value) })" />
               <span class="field__help">Évite d’éteindre puis rallumer entre deux impressions proches.</span>
             </div>
+            <SettingNumber id="adv-boot" label="Démarrage de l’imprimante après l’allumage (min)" :value="s.boot_settle_min" :min="0" :max="15"
+                           :step="0.5" help="Temps laissé avant de lui parler (un K2 met environ 2 min)." @save="(v) => saveSoon({ boot_settle_min: v })" />
           </div>
+          <div class="form-row">
+            <SettingNumber id="adv-offline" label="Imprimante muette après l’allumage (min)" :value="s.offline_grace_min" :min="1" :max="60"
+                           help="En plus du délai d’allumage ; ensuite l’impression passe « à revoir »."
+                           @save="(v) => saveSoon({ offline_grace_min: v })" />
+            <SettingNumber id="adv-launch" label="Envoi du fichier et démarrage (min)" :value="s.launch_timeout_min" :min="1" :max="60"
+                           help="Au-delà, le lancement est abandonné." @save="(v) => saveSoon({ launch_timeout_min: v })" />
+          </div>
+          <div class="form-row">
+            <SettingNumber id="adv-start" label="Chauffe et calibrage tolérés (min)" :value="s.start_grace_min" :min="1" :max="60"
+                           help="Après l’envoi, sans impression visible ; rien n’est conclu avant." @save="(v) => saveSoon({ start_grace_min: v })" />
+            <SettingNumber id="adv-busy" label="… si l’imprimante se dit occupée (min)" :value="s.busy_grace_min" :min="1" :max="180"
+                           help="Longue calibration du K2." @save="(v) => saveSoon({ busy_grace_min: v })" />
+          </div>
+          <p class="small muted">
+            Une demande de confirmation sans réponse est renvoyée une fois, à l’heure prévue et au plus tôt à mi-délai.
+          </p>
           <p class="small muted">Fuseau horaire : <span class="mono">{{ s.env.timezone }}</span></p>
           <div v-if="Object.keys(s.env.errors).length" class="notice notice--error">
             <span>
@@ -499,4 +569,7 @@ async function rotateKey() {
 @media (max-width: 40rem) { .creds { margin-left: 0; } }
 
 details.more.panel { padding-block: 0; }
+.rules { display: grid; margin: 0; padding: 0; list-style: none; }
+.rules__row { display: flex; align-items: center; gap: var(--space-xs); min-height: 40px; border-bottom: var(--rule-hair) solid var(--color-rule); }
+.rules__row > span:nth-child(2), .rules__row > span:first-child:not(.swatch) { flex: 1; }
 </style>

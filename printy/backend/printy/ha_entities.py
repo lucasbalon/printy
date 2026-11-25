@@ -241,7 +241,7 @@ class EntityPublisher:
                        round(st.remaining_s / 60) if st.active and st.remaining_s is not None else 0,
                        unit="min", device_class="duration", device=dev),
                 Entity(f"printy_{sl}_fin_impression", f"{uid}_fin_impression", "Fin d’impression",
-                       window[1].isoformat() if window else None, device_class="timestamp", device=dev),
+                       window[1].isoformat() if window and window[1] else None, device_class="timestamp", device=dev),
                 Entity(f"printy_{sl}_prochaine_impression", f"{uid}_prochaine_impression", "Prochaine impression",
                        nxt.start_at.isoformat() if nxt else None,
                        {"modele": nxt.sliced_file.model.name if nxt else None}, device_class="timestamp", device=dev),

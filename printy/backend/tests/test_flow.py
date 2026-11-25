@@ -230,7 +230,7 @@ def test_ignored_start_is_not_taken_for_a_cancel(monkeypatch):
         s.commit()
     loop.run_until_complete(step())
     assert job().status == "needs_attention"
-    assert "non démarrée" in sent[-1]
+    assert "à revoir" in sent[-1]  # the phone is told
     loop.close()
 
 

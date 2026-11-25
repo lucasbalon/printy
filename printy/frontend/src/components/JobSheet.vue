@@ -23,6 +23,8 @@ let timer: number | undefined;
 
 const MOVABLE = ["scheduled", "needs_attention", "awaiting_confirmation", "powering_on"];
 const CLOSED = ["finished", "failed", "cancelled"];
+// nothing sent to the printer: such a print is simply deleted
+const NOT_STARTED = ["scheduled", "powering_on", "awaiting_confirmation", "ready", "needs_attention"];
 
 async function load() {
   if (!props.jobId) return;
@@ -77,8 +79,11 @@ const closed = computed(() => !!job.value && CLOSED.includes(job.value.status));
 const running = computed(() => job.value?.status === "printing" || job.value?.status === "paused");
 // what the printer itself reports: a job stuck in Printy can always be cancelled when nothing runs
 const printerActive = computed(() => ["printing", "paused"].includes(printer.value?.live?.state ?? ""));
+const notStarted = computed(() => !!job.value && NOT_STARTED.includes(job.value.status));
+// sent to the printer: cancelled (kept in the history); a print the printer really runs
+// is stopped with "Arrêter l'impression" instead
 const cancellable = computed(
-  () => !!job.value && !closed.value && (!(running.value || job.value.status === "starting") || !printerActive.value),
+  () => !!job.value && (job.value.status === "starting" || running.value) && !printerActive.value,
 );
 const photoUrl = computed(() => {
   void photoKey.value;
@@ -100,7 +105,13 @@ async function act(fn: () => Promise<Job | void>, success?: string) {
 
 const startNow = () => act(() => api.post<Job>(`/jobs/${job.value!.id}/start-now`), "Plateau confirmé, lancement en cours.");
 const confirmBed = () => act(() => api.post<Job>(`/jobs/${job.value!.id}/confirm`), "Plateau confirmé.");
-const snooze = () => act(() => api.post<Job>(`/jobs/${job.value!.id}/snooze?minutes=60`), "Reportée d’une heure.");
+const snoozeMin = computed(() => state.settings?.snooze_min ?? 60);
+const snoozeLabel = computed(() => {
+  const h = Math.floor(snoozeMin.value / 60);
+  const m = snoozeMin.value % 60;
+  return h ? (m ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`) : `${m} min`;
+});
+const snooze = () => act(() => api.post<Job>(`/jobs/${job.value!.id}/snooze`), `Reportée de ${snoozeLabel.value}.`);
 const move = () =>
   act(
     () => api.patch<Job>(`/jobs/${job.value!.id}`, { start_at: fromInputs(date.value, hour.value).toISOString() }),
@@ -114,11 +125,13 @@ async function cancelJob() {
 }
 
 async function remove() {
+  const name = job.value!.model_name;
+  if (notStarted.value && !window.confirm(`Supprimer « ${name} » du planning ?`)) return;
   busy.value = true;
   const ok = await attempt(() => api.del(`/jobs/${job.value!.id}`));
   busy.value = false;
   if (ok !== undefined) {
-    toast("Retirée du planning.");
+    toast(notStarted.value ? "Impression supprimée." : "Retirée de l’historique.");
     emit("changed");
     emit("close");
   }
@@ -239,7 +252,7 @@ async function markDefect() {
           <button type="button" class="btn btn--primary" :disabled="busy" @click="job.status === 'awaiting_confirmation' && new Date(job.start_at) > new Date() ? confirmBed() : startNow()">
             {{ job.status === "awaiting_confirmation" && new Date(job.start_at) > new Date() ? `Plateau vide, lancer à ${time(job.start_at)}` : "Plateau vide, lancer maintenant" }}
           </button>
-          <button type="button" class="btn btn--secondary" :disabled="busy" @click="snooze">Reporter d'1 h</button>
+          <button type="button" class="btn btn--secondary" :disabled="busy" @click="snooze">Reporter de {{ snoozeLabel }}</button>
           <button type="button" class="btn btn--ghost" :disabled="busy" @click="photoFailed = false; photoKey++">Nouvelle photo</button>
         </div>
       </section>
@@ -326,10 +339,9 @@ async function markDefect() {
     </div>
 
     <template v-if="job" #foot>
-      <button v-if="closed || job.status === 'scheduled' || job.status === 'needs_attention'" type="button" class="btn btn--ghost" :disabled="busy" @click="remove">
-        Retirer du planning
-      </button>
-      <button v-if="cancellable" type="button" class="btn btn--danger" :disabled="busy" @click="cancelJob">
+      <button v-if="notStarted" type="button" class="btn btn--danger" :disabled="busy" @click="remove">Supprimer</button>
+      <button v-else-if="closed" type="button" class="btn btn--ghost" :disabled="busy" @click="remove">Retirer de l’historique</button>
+      <button v-else-if="cancellable" type="button" class="btn btn--danger" :disabled="busy" @click="cancelJob">
         {{ job.status === "starting" ? "Annuler le lancement" : "Annuler l’impression" }}
       </button>
       <button type="button" class="btn btn--secondary" @click="emit('close')">Fermer</button>

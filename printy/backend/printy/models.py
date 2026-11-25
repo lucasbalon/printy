@@ -131,6 +131,14 @@ ACTIVE_STATUSES = {
 }
 OPEN_STATUSES = ACTIVE_STATUSES | {JobStatus.SCHEDULED, JobStatus.NEEDS_ATTENTION}
 CLOSED_STATUSES = {JobStatus.FINISHED, JobStatus.FAILED, JobStatus.CANCELLED}
+# nothing sent to the printer yet (or the launch failed): such a print is simply deleted
+NOT_STARTED_STATUSES = {
+    JobStatus.SCHEDULED,
+    JobStatus.POWERING_ON,
+    JobStatus.AWAITING_CONFIRMATION,
+    JobStatus.READY,
+    JobStatus.NEEDS_ATTENTION,
+}
 
 
 class Job(Base):
@@ -144,6 +152,7 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(30), default=JobStatus.SCHEDULED, index=True)
     confirm_required: Mapped[bool] = mapped_column(Boolean, default=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    confirm_resent: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # reminder sent
     notified_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     powered_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

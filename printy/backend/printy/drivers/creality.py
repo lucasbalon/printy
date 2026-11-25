@@ -130,6 +130,8 @@ class CrealityDriver(PrinterDriver):
         state = _STATES.get(int(code), PrinterState.BUSY) if _num(code) is not None else PrinterState.IDLE
         progress = _num(s.get("printProgress"))
         left = _num(s.get("printLeftTime"))
+        if left is not None and left <= 0 and (progress or 0) < 99:
+            left = None  # heating and calibration: the K2 reports 0 until it really prints
         spent = _num(s.get("printJobTime"))
         return PrinterStatus(
             state=state,

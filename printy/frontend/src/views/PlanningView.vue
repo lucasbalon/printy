@@ -123,14 +123,14 @@ interface LivePrint {
   job: Job | null;
   name: string;
   start: Date;
-  end: Date;
+  end: Date | null; // unknown while the printer heats and calibrates (outside Printy)
   progress: number;
   remaining: number | null;
   paused: boolean;
 }
 const livePrints = computed<LivePrint[]>(() =>
   printers.value
-    .filter((p) => (p.live.state === "printing" || p.live.state === "paused") && p.live.print_ends_at)
+    .filter((p) => p.live.state === "printing" || p.live.state === "paused")
     .map((p) => {
       const job = jobs.value.find((j) => j.id === p.live.job_id) ?? null;
       const file = (p.live.file ?? "Impression")
@@ -143,7 +143,8 @@ const livePrints = computed<LivePrint[]>(() =>
         job,
         name: job?.model_name ?? file,
         start: new Date(p.live.print_started_at ?? Date.now()),
-        end: new Date(p.live.print_ends_at!),
+        // the printer's estimate; while it has none, the planned end of Printy's print
+        end: p.live.print_ends_at ? new Date(p.live.print_ends_at) : job ? new Date(job.end_at) : null,
         progress: p.live.progress ?? 0,
         remaining: p.live.remaining_s,
         paused: p.live.state === "paused",
@@ -157,7 +158,7 @@ function externalFor(day: Date, printerId: number) {
   const dayStart = startOfDay(day).getTime();
   const dayEnd = addDays(day, 1).getTime();
   const s = lp.start.getTime();
-  const e = Math.max(lp.end.getTime(), Date.now() + 5 * 60_000);
+  const e = Math.max(lp.end?.getTime() ?? 0, Date.now() + 5 * 60_000);
   if (e <= dayStart || s >= dayEnd) return null;
   const from = Math.max(s, dayStart);
   const to = Math.min(e, dayEnd);
@@ -416,9 +417,14 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
           <span class="progress__bar" :style="{ transform: `scaleX(${lp.progress})` }" />
         </span>
         <span class="running__figures small">
-          <span class="mono">{{ Math.round(lp.progress * 100) }} %</span>
-          <span v-if="lp.remaining != null">reste <span class="mono">{{ duration(lp.remaining) }}</span></span>
-          <span>fin vers <span class="mono">{{ time(lp.end) }}</span></span>
+          <template v-if="lp.remaining == null && lp.progress < 0.01">
+            <span>Préparation (chauffe, calibrage)</span>
+          </template>
+          <template v-else>
+            <span class="mono">{{ Math.round(lp.progress * 100) }} %</span>
+            <span v-if="lp.remaining != null">reste <span class="mono">{{ duration(lp.remaining) }}</span></span>
+          </template>
+          <span v-if="lp.end">fin vers <span class="mono">{{ time(lp.end) }}</span></span>
         </span>
       </button>
     </section>
@@ -540,7 +546,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
                     :style="{ top: `${ext.top}px`, height: `${ext.height}px`, '--filament': 'var(--color-accent)' }"
                     role="button"
                     tabindex="0"
-                    :aria-label="`${ext.lp.name}, en cours, fin vers ${time(ext.lp.end)}`"
+                    :aria-label="`${ext.lp.name}, en cours${ext.lp.end ? `, fin vers ${time(ext.lp.end)}` : ''}`"
                     @click="openLive(ext.lp)"
                     @keydown.enter="openLive(ext.lp)"
                   >

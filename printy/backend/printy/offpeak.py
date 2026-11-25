@@ -9,10 +9,9 @@ from .config import config
 Interval = tuple[datetime, datetime]
 
 STEP = timedelta(minutes=15)
-HORIZON = timedelta(days=3)
 
 
-def intervals(ranges: list[dict[str, str]], around: datetime, days: int = 5) -> list[Interval]:
+def intervals(ranges: list[dict[str, str]], around: datetime, days: int = 16) -> list[Interval]:
     """Off-peak intervals (aware datetimes) from the day before `around` on."""
     tz = config.timezone
     day0 = around.astimezone(tz).date() - timedelta(days=1)
@@ -38,19 +37,31 @@ def share(start: datetime, end: datetime, ivs: list[Interval]) -> float:
     return min(1.0, inside / total)
 
 
+def first_free(duration: timedelta, busy: list[Interval], now: datetime) -> datetime:
+    """Earliest start from now that overlaps nothing."""
+    for start in sorted({now} | {e for _, e in busy if e > now}):
+        if not any(s < start + duration and start < e for s, e in busy):
+            return start
+    return now  # unreachable: the latest end is always free
+
+
 def best_slot(
     ranges: list[dict[str, str]], duration: timedelta, busy: list[Interval], now: datetime
 ) -> tuple[datetime, float] | None:
-    """Earliest free start with the largest off-peak share, within the next 3 days."""
+    """Earliest free start with the largest off-peak share, within the horizon
+    (settings: offpeak_horizon_days, 3 by default)."""
+    from .settings import tune
+
     if not ranges:
         return None
+    horizon = timedelta(days=tune.offpeak_horizon_days)
     ivs = intervals(ranges, now)
     first = now.replace(second=0, microsecond=0)
     first += timedelta(minutes=-first.minute % 15)
-    candidates = {first + STEP * i for i in range(int(HORIZON / STEP))}
+    candidates = {first + STEP * i for i in range(int(horizon / STEP))}
     candidates |= {s for s, _ in ivs} | {e - duration for _, e in ivs} | {e for _, e in busy}
     best: tuple[datetime, float] | None = None
-    for start in sorted(c for c in candidates if now <= c <= now + HORIZON):
+    for start in sorted(c for c in candidates if now <= c <= now + horizon):
         end = start + duration
         if any(s < end and start < e for s, e in busy):
             continue

@@ -181,7 +181,10 @@ const remainingThen = computed(() => preview.value?.spool_remaining_g ?? chosenS
 const tooLittle = computed(() =>
   preview.value?.low_filament != null
     ? preview.value.low_filament
-    : remainingThen.value != null && !!version.value?.filament_g && remainingThen.value < version.value.filament_g * 1.05,
+    : remainingThen.value != null &&
+      !!version.value?.filament_g &&
+      remainingThen.value - (state.settings?.spool_reserve_g ?? 0) <
+        version.value.filament_g * (1 + (state.settings?.filament_margin_pct ?? 5) / 100),
 );
 
 const canSave = computed(() => !!slicedId.value && !!printerId.value && !!start.value && !saving.value);

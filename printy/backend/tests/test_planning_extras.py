@@ -205,3 +205,100 @@ def test_export_endpoint():
     init_db()
     r = TestClient(app).get("/api/v1/backup")
     assert r.status_code == 200 and r.content[:16] == b"SQLite format 3\x00"
+
+
+# -- delete -----------------------------------------------------------------------
+
+
+def test_print_not_started_is_deleted_and_plug_cut_later(monkeypatch):
+    """Deleting a print Printy switched the printer on for: no trace, plug cut once cool."""
+    init_db()
+    _notifier(monkeypatch)
+    client = TestClient(app)
+    pid, sliced_id = _setup(client, "suppression")
+    client.put(f"/api/v1/printers/{pid}", json={
+        "name": "suppression", "driver": "demo", "options": {"speed": 1}, "camera_source": "none",
+        "switch_entity": "switch.prise_suppression",
+    })
+    jid = client.post("/api/v1/jobs", json={
+        "sliced_file_id": sliced_id, "printer_id": pid, "start_at": (utcnow() + timedelta(minutes=3)).isoformat(),
+        "confirm_required": True,
+    }).json()["id"]
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(_step())
+    assert _status(jid) == "awaiting_confirmation"
+    assert client.delete(f"/api/v1/jobs/{jid}").status_code == 204
+    with SessionLocal() as s:
+        assert s.get(Job, jid) is None
+        assert s.get(Printer, pid).power_off_pending is True
+    loop.close()
+
+
+def test_cancel_from_the_phone_deletes_a_print_not_started(monkeypatch):
+    init_db()
+    _notifier(monkeypatch)
+    client = TestClient(app)
+    pid, sliced_id = _setup(client, "annul_tel")
+    jid = client.post("/api/v1/jobs", json={
+        "sliced_file_id": sliced_id, "printer_id": pid, "start_at": (utcnow() + timedelta(hours=5)).isoformat(),
+    }).json()["id"]
+    asyncio.new_event_loop().run_until_complete(scheduler.on_notification_action(f"PRINTY_CANCEL_{jid}"))
+    with SessionLocal() as s:
+        assert s.get(Job, jid) is None
+
+
+def test_running_print_cannot_be_deleted():
+    init_db()
+    client = TestClient(app)
+    pid, sliced_id = _setup(client, "en_cours")
+    jid = client.post("/api/v1/jobs", json={
+        "sliced_file_id": sliced_id, "printer_id": pid, "start_at": utcnow().isoformat(), "start_now": True,
+    }).json()["id"]
+    loop = asyncio.new_event_loop()
+    for _ in range(3):
+        loop.run_until_complete(_step())
+        loop.run_until_complete(asyncio.sleep(0.05))
+    assert _status(jid) == "printing"
+    assert client.delete(f"/api/v1/jobs/{jid}").status_code == 409
+    loop.run_until_complete(manager.live[pid].driver.cancel())
+    loop.close()
+
+
+# -- K2 figures during heating ----------------------------------------------------
+
+
+def test_k2_remaining_time_unknown_while_heating():
+    """The K2 reports 0 min left until it really prints: no end time, not "now"."""
+    from printy.drivers.creality import CrealityDriver
+
+    driver = CrealityDriver("192.0.2.1", {})
+    driver._connected.set()
+    driver._state.update({"state": 1, "printProgress": 0, "printLeftTime": 0, "nozzleTemp": 150, "bedTemp0": 60})
+    st = asyncio.new_event_loop().run_until_complete(driver.status())
+    assert st.state == "printing" and st.remaining_s is None
+    driver._state.update({"printProgress": 12, "printLeftTime": 3600})
+    st = asyncio.new_event_loop().run_until_complete(driver.status())
+    assert st.remaining_s == 3600
+    driver._state.update({"printProgress": 100, "printLeftTime": 0})
+    assert asyncio.new_event_loop().run_until_complete(driver.status()).remaining_s == 0
+
+
+# -- settings that used to be fixed ------------------------------------------------
+
+
+def test_tunables_are_settings():
+    init_db()
+    client = TestClient(app)
+    values = client.get("/api/v1/settings").json()
+    assert values["snooze_min"] == 60 and values["start_grace_min"] == 10 and values["bed_reminder_hours"] == 2.0
+    pid, sliced_id = _setup(client, "reglages")
+    start = utcnow() + timedelta(hours=4)
+    jid = client.post("/api/v1/jobs", json={"sliced_file_id": sliced_id, "printer_id": pid, "start_at": start.isoformat()}).json()["id"]
+    assert client.patch("/api/v1/settings", json={"snooze_min": 30}).status_code == 200
+    try:
+        moved = client.post(f"/api/v1/jobs/{jid}/snooze").json()
+        assert abs((datetime.fromisoformat(moved["start_at"]) - start).total_seconds() - 1800) < 2
+        assert client.patch("/api/v1/settings", json={"snooze_min": 1}).status_code == 422  # out of range
+    finally:
+        client.patch("/api/v1/settings", json={"snooze_min": 60})
+        client.delete(f"/api/v1/jobs/{jid}")

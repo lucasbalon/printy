@@ -44,15 +44,16 @@ class PrinterManager:
     def spool_pushed(self, printer_id: int) -> None:
         self._pending_spool.pop(printer_id, None)
 
-    def print_window(self, printer_id: int) -> tuple[datetime, datetime] | None:
-        """Start and predicted end of the print running now, from the printer's own figures."""
+    def print_window(self, printer_id: int) -> tuple[datetime, datetime | None] | None:
+        """Start and predicted end of the print running now, from the printer's own figures.
+        The end is None while the printer does not know it yet (heating, calibration)."""
         st = self.status(printer_id)
         if not st.active:
             return None
         now = utcnow()
         elapsed = st.estimated_elapsed()
         start = now - timedelta(seconds=elapsed) if elapsed is not None else now
-        end = now + timedelta(seconds=st.remaining_s) if st.remaining_s is not None else now
+        end = now + timedelta(seconds=st.remaining_s) if st.remaining_s is not None else None
         return start, end
 
     def tracked(self, printer_id: int) -> bool:
