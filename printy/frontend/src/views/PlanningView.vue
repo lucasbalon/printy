@@ -270,33 +270,74 @@ interface Drag {
   startX: number;
   startY: number;
   grabMin: number;
+  touch: boolean; // finger: the block moves only after a long press, a swipe scrolls the page
+  armed: boolean;
   active: boolean;
   target: { day: Date; printerId: number; minutes: number } | null;
 }
 const drag = ref<Drag | null>(null);
 let dragJustEnded = false;
+let pressTimer: number | undefined;
+const LONG_PRESS_MS = 400;
 
 function onBlockDown(e: PointerEvent, seg: Segment) {
   if (e.button !== 0 || !MOVABLE.includes(seg.job.status) || !seg.startsHere) return;
   const lane = (e.currentTarget as HTMLElement).closest<HTMLElement>("[data-lane]")!;
   const startMin = Math.round(seg.top / HOUR_PX * 60);
+  const touch = e.pointerType !== "mouse";
   drag.value = {
     job: seg.job,
     pointerId: e.pointerId,
     startX: e.clientX,
     startY: e.clientY,
     grabMin: ((e.clientY - lane.getBoundingClientRect().top) / HOUR_PX) * 60 - startMin,
+    touch,
+    armed: !touch,
     active: false,
     target: null,
   };
+  if (touch) {
+    window.clearTimeout(pressTimer);
+    pressTimer = window.setTimeout(() => {
+      if (drag.value && !drag.value.active) {
+        drag.value.armed = true;
+        navigator.vibrate?.(15);
+      }
+    }, LONG_PRESS_MS);
+  }
   window.addEventListener("pointermove", onMove);
-  window.addEventListener("pointerup", onUp, { once: true });
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", stopDrag);
 }
+
+// the page scrolls (or the finger moved before the long press): no move, no opening
+function stopDrag() {
+  window.clearTimeout(pressTimer);
+  window.removeEventListener("pointermove", onMove);
+  window.removeEventListener("pointerup", onUp);
+  window.removeEventListener("pointercancel", stopDrag);
+  drag.value = null;
+}
+
+// once a block is held, the finger moves it instead of scrolling the page
+function holdScroll(e: TouchEvent) {
+  if (drag.value?.armed) e.preventDefault();
+}
+onMounted(() => window.addEventListener("touchmove", holdScroll, { passive: false }));
+onBeforeUnmount(() => {
+  window.removeEventListener("touchmove", holdScroll);
+  stopDrag();
+});
 
 function onMove(e: PointerEvent) {
   const d = drag.value;
   if (!d || e.pointerId !== d.pointerId) return;
-  if (!d.active && Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 6) return;
+  const moved = Math.hypot(e.clientX - d.startX, e.clientY - d.startY);
+  if (!d.armed) {
+    if (moved > 8) stopDrag(); // a swipe: let the page scroll
+    return;
+  }
+  if (!d.active && moved < 6) return;
   d.active = true;
   const lane = document
     .elementsFromPoint(e.clientX, e.clientY)
@@ -309,11 +350,10 @@ function onMove(e: PointerEvent) {
   d.target = { day, printerId: Number(lane.dataset.printer), minutes };
 }
 
-async function onUp() {
-  window.removeEventListener("pointermove", onMove);
+async function onUp(e: PointerEvent) {
   const d = drag.value;
-  drag.value = null;
-  if (!d) return;
+  if (!d || e.pointerId !== d.pointerId) return;
+  stopDrag();
   if (!d.active) {
     jobId.value = d.job.id;
     return;
@@ -516,7 +556,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
                   v-for="seg in segmentsFor(d, p.id)"
                   :key="`${seg.job.id}-${seg.top}`"
                   class="block"
-                  :class="[blockClass(seg.job), { 'is-ghosted': drag?.active && drag.job.id === seg.job.id, 'block--swap': seg.startsHere && seg.job.spool_change }]"
+                  :class="[blockClass(seg.job), { 'is-ghosted': drag?.active && drag.job.id === seg.job.id, 'is-held': drag?.touch && drag.armed && !drag.active && drag.job.id === seg.job.id, 'block--swap': seg.startsHere && seg.job.spool_change }]"
                   :style="{ top: `${seg.top}px`, height: `${seg.height}px`, '--filament': spoolById(seg.job.spool_id)?.color ?? seg.job.color ?? 'var(--color-paper-3)' }"
                   role="button"
                   tabindex="0"
@@ -578,6 +618,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
         </div>
       </div>
       <p class="hint muted small">Clique sur un créneau libre pour planifier. Fais glisser une impression pour la déplacer.</p>
+      <p class="hint hint--touch muted small">Touche un créneau libre pour planifier. Garde le doigt appuyé sur une impression pour la déplacer.</p>
     </template>
 
     <ScheduleSheet :open="scheduleOpen" :preset="preset" @close="scheduleOpen = false" @created="onCreated" />
@@ -686,7 +727,9 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
   line-height: 1.25;
   cursor: pointer;
   user-select: none;
-  touch-action: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: pan-y;
   transition: box-shadow var(--dur-micro) var(--ease-out), opacity var(--dur-micro) var(--ease-out);
 }
 .block:hover { box-shadow: inset 4px 0 0 var(--filament), 3px 3px 0 var(--color-ink); }
@@ -697,6 +740,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
 .block--done { background: var(--color-paper-2); color: var(--color-muted); border-color: var(--color-rule); }
 .block--failed { background: var(--color-error-soft); color: var(--color-error); border-color: var(--color-error); }
 .block.is-ghosted { opacity: 0.35; }
+.block.is-held { box-shadow: inset 4px 0 0 var(--filament), 3px 3px 0 var(--color-ink); transform: translate(-1px, -1px); }
 .block--live { background: var(--color-accent-soft); border-style: dashed; cursor: pointer; }
 .block__time { font-size: var(--text-xs); }
 .block__flags { position: absolute; top: var(--space-2xs); right: var(--space-2xs); display: flex; gap: var(--space-3xs); color: var(--color-accent-strong); }
@@ -723,6 +767,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
 .is-dragging, .is-dragging * { cursor: grabbing !important; }
 
 .hint { margin-top: var(--space-md); }
-@media (hover: none) { .hint { display: none; } }
+.hint--touch { display: none; }
+@media (hover: none) { .hint { display: none; } .hint--touch { display: block; } }
 @media (max-width: 60rem) { .week { --gutter-w: 48px; } }
 </style>
