@@ -179,11 +179,20 @@ const clock = window.setInterval(() => (now.value = new Date()), 30_000);
 onBeforeUnmount(() => window.clearInterval(clock));
 const nowTop = computed(() => ((now.value.getHours() * 60 + now.value.getMinutes()) / 60) * HOUR_PX);
 
+// The page itself scrolls through the hours. On opening, jump close to the current
+// hour, unless something above the board (to check, printing now) should be seen first.
 const scroller = ref<HTMLElement | null>(null);
-onMounted(async () => {
+let jumped = false;
+watch([scroller, loaded], async ([el, ready]) => {
+  if (jumped || !el || !ready) return;
+  jumped = true;
   await nextTick();
+  if (state.attention.length || livePrints.value.length || !scroller.value) return;
   const hour = isCurrentWeek.value ? Math.max(0, now.value.getHours() - 2) : 7;
-  scroller.value?.scrollTo({ top: hour * HOUR_PX });
+  const sticky = scroller.value.previousElementSibling?.getBoundingClientRect().height ?? 0;
+  const topbar = document.querySelector(".topbar")?.getBoundingClientRect().height ?? 0;
+  const y = scroller.value.getBoundingClientRect().top + window.scrollY + hour * HOUR_PX - sticky - topbar;
+  if (y > 0) window.scrollTo({ top: y });
 });
 
 function blockClass(job: Job) {
@@ -443,19 +452,20 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
     </div>
 
     <template v-else>
-      <div v-if="narrow" class="daytabs segmented" role="group" aria-label="Jour">
-        <button
-          v-for="(d, i) in days"
-          :key="i"
-          type="button"
-          :aria-pressed="i === dayIndex"
-          @click="dayIndex = i"
-        >
-          {{ shortDay(d) }}
-        </button>
-      </div>
-
       <div class="week card" :class="{ 'is-dragging': drag?.active }" :style="{ '--days': visibleDays.length }">
+        <!-- stays at the top while the page scrolls through the hours -->
+        <div class="week__top">
+        <div v-if="narrow" class="daytabs segmented" role="group" aria-label="Jour">
+          <button
+            v-for="(d, i) in days"
+            :key="i"
+            type="button"
+            :aria-pressed="i === dayIndex"
+            @click="dayIndex = i"
+          >
+            {{ shortDay(d) }}
+          </button>
+        </div>
         <div class="week__head">
           <div class="week__corner">
             <span v-if="offPeak.length" class="legend"><span class="legend__box" />HC</span>
@@ -471,6 +481,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
               <span v-for="p in printers" :key="p.id">{{ p.name }}</span>
             </div>
           </div>
+        </div>
         </div>
 
         <div ref="scroller" class="week__scroll">
@@ -618,11 +629,15 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
 .running__bar { margin-block: var(--space-2xs); }
 .running__figures { display: flex; flex-wrap: wrap; gap: var(--space-2xs) var(--space-md); color: var(--color-ink-2); }
 
-.daytabs { margin-bottom: var(--space-md); }
-.daytabs button { flex: 1; padding-inline: var(--space-2xs); min-width: 0; }
+.daytabs { flex-wrap: nowrap; }
+.daytabs button { flex: 1; padding-inline: var(--space-2xs); min-width: 0; border-top: 0; }
+.daytabs button:first-child { border-left: 0; }
+.daytabs button:last-child { border-right: 0; }
 
-/* the week board */
-.week { --gutter-w: 56px; overflow: hidden; }
+/* the week board: the page scrolls through the hours (no scroll area of its own),
+   the day tabs and day names stay under the top bar */
+.week { --gutter-w: 56px; overflow: clip; }
+.week__top { position: sticky; top: calc(var(--topbar-h) + var(--rule-bar)); z-index: var(--z-sticky); background: var(--color-plate); }
 .week__head, .week__body { display: grid; grid-template-columns: var(--gutter-w) repeat(var(--days), minmax(0, 1fr)); }
 .week__head { border-bottom: var(--rule-bar) solid var(--color-ink); background: var(--color-plate); }
 .week__corner { display: flex; align-items: end; padding: var(--space-xs); }
@@ -634,7 +649,6 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
 .dayhead__lanes { display: flex; gap: var(--space-3xs); font-size: var(--text-xs); color: var(--color-muted); }
 .dayhead__lanes span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.week__scroll { max-height: max(420px, calc(100dvh - 300px)); overflow-y: auto; overscroll-behavior: contain; }
 .week__body { position: relative; }
 .hours { position: relative; }
 .hours span { position: absolute; right: var(--space-xs); transform: translateY(-50%); font-family: var(--font-outlier); font-size: var(--text-xs); color: var(--color-muted); }

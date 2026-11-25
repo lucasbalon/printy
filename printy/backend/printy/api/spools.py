@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -151,12 +151,19 @@ def set_loaded_spool(printer_id: int, body: LoadedSpool, s: DB):
 # -- finishing a spool --------------------------------------------------------------
 
 
-def _candidates(s: Session, tag: str, spool: Spool) -> list[Candidate]:
-    """Printable versions of the tag's models that suit the spool's material."""
+def _candidates(s: Session, spool: Spool, tags: set[str] | None = None) -> list[Candidate]:
+    """Printable versions of the models that suit the spool's material: all of them,
+    or only those carrying one of the tags."""
     out: list[Candidate] = []
     models = s.scalars(select(Model).options(selectinload(Model.sliced))).all()
     for m in models:
-        if tag not in (m.tags or []):
+        if tags is not None and not tags.intersection(m.tags or []):
+            continue
+        versions = [
+            v for v in m.active_sliced
+            if v.filament_g and (not v.material or not spool.material or v.material.lower() == spool.material.lower())
+        ]
+        if not versions:
             continue
         # stock in the spool's colour (the variant a print on this spool would produce)
         items = production.stock_of(s, m.id)
@@ -165,10 +172,6 @@ def _candidates(s: Session, tag: str, spool: Spool) -> list[Candidate]:
             if i.variant == spool.name or (i.color and spool.color and color_distance(i.color, spool.color) <= GOOD_MATCH)
         ]
         stock = sum(i.quantity for i in same)
-        versions = [
-            v for v in m.active_sliced
-            if v.filament_g and (not v.material or not spool.material or v.material.lower() == spool.material.lower())
-        ]
         for v in versions:
             label = ", ".join(x for x in (v.printer_model, f"{v.layer_height} mm" if v.layer_height else None) if x)
             out.append(Candidate(
@@ -201,12 +204,32 @@ async def _spool_and_available(s: Session, spool_id: int) -> tuple[Spool, float,
 
 
 @router.get("/spools/{spool_id}/finish")
-async def finish_spool(spool_id: int, s: DB, tag: str | None = None):
-    """Best combinations of prints to use up a spool (suggestions only)."""
+async def finish_spool(
+    spool_id: int,
+    s: DB,
+    tag: Annotated[list[str] | None, Query()] = None,
+    everything: bool = False,
+):
+    """Best combinations of prints to use up a spool (suggestions only), for the chosen
+    tags or every model; plus every model that fits the spool, to compose by hand."""
     spool, available, planned = await _spool_and_available(s, spool_id)
-    suggested = rule_tags(settings_store.get(s, "tag_rules") or [], spool)
-    tag = tag or (suggested[0] if suggested else None)
-    cands = _candidates(s, tag, spool) if tag else []
+    rules = settings_store.get(s, "tag_rules") or []
+    suggested = rule_tags(rules, spool)
+    # rules that apply to this spool, so they can be forgotten from here
+    applying = [
+        {"index": i, "tag": r["tag"]} for i, r in enumerate(rules)
+        if r.get("tag") and rule_tags([r], spool)
+    ]
+    chosen = [t for t in (tag or []) if t]
+    if not chosen and not everything:
+        chosen = suggested
+    catalog = _candidates(s, spool)
+    if chosen:
+        wanted = set(chosen)
+        model_tags = {m.id: set(m.tags or []) for m in s.scalars(select(Model))}
+        cands = [c for c in catalog if wanted & model_tags.get(c.model_id, set())]
+    else:
+        cands = catalog
     return {
         "spool": spool.to_dict(),
         "remaining_g": spool.remaining_g,
@@ -214,10 +237,19 @@ async def finish_spool(spool_id: int, s: DB, tag: str | None = None):
         "margin_pct": limits.margin_pct,
         "planned_g": round(planned, 1),
         "available_g": round(available, 1),
-        "tag": tag,
+        "tags": chosen,
         "suggested_tags": suggested,
+        "rules": applying,
         "candidates": len(cands),
         "proposals": proposals(cands, available),
+        "catalog": [
+            {
+                "sliced_id": c.sliced_id, "model_id": c.model_id, "model_name": c.model_name, "label": c.label,
+                "filament_g": round(c.filament_g, 1), "need_g": round(c.need_g, 1), "pieces": c.pieces,
+                "duration_s": c.duration_s, "stock": c.stock, "alert": c.alert,
+            }
+            for c in sorted(catalog, key=lambda c: (c.model_name.lower(), c.label))
+        ],
     }
 
 

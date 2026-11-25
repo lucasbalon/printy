@@ -75,8 +75,12 @@ def test_finish_endpoint_and_plan(monkeypatch):
         s.commit()
 
     res = client.get("/api/v1/spools/77/finish").json()
-    assert res["tag"] is None and res["proposals"] == []  # no rule yet: pick a tag
-    res = client.get("/api/v1/spools/77/finish?tag=abat-jour-test").json()
+    assert res["tags"] == [] and res["rules"] == []  # no rule yet: every model
+    assert res["proposals"]
+    mine = [c for c in res["catalog"] if c["model_id"] == model_id]
+    assert mine and mine[0]["filament_g"] == 100.0 and mine[0]["need_g"] == 105.0  # to compose by hand
+    res = client.get("/api/v1/spools/77/finish?tag=abat-jour-test&tag=autre").json()
+    assert res["tags"] == ["abat-jour-test", "autre"]
     assert res["available_g"] == 350.0
     best = res["proposals"][0]
     assert best["prints"] == 3 and best["leftover_g"] == 50.0  # 3 × 100 g (+5 %) in 350 g
@@ -84,7 +88,9 @@ def test_finish_endpoint_and_plan(monkeypatch):
     # remembered for this kind of spool
     client.patch("/api/v1/settings", json={"tag_rules": [{"tag": "abat-jour-test", "material": "PLA", "color": "#FFFFFF"}]})
     try:
-        assert client.get("/api/v1/spools/77/finish").json()["tag"] == "abat-jour-test"
+        res = client.get("/api/v1/spools/77/finish").json()
+        assert res["tags"] == ["abat-jour-test"] and res["rules"] == [{"index": 0, "tag": "abat-jour-test"}]
+        assert client.get("/api/v1/spools/77/finish?everything=true").json()["tags"] == []  # rule set aside
         jobs = client.post("/api/v1/spools/77/finish/plan", json={
             "printer_id": pid, "items": [{"sliced_id": best["items"][0]["sliced_id"], "count": 3}],
         })
@@ -94,7 +100,7 @@ def test_finish_endpoint_and_plan(monkeypatch):
         starts = sorted(j["start_at"] for j in planned)
         assert len(set(starts)) == 3  # one after the other, no overlap
         # what is planned now counts: nothing more fits
-        assert client.get("/api/v1/spools/77/finish").json()["proposals"] == []
+        assert client.get("/api/v1/spools/77/finish?tag=abat-jour-test").json()["proposals"] == []
     finally:
         client.patch("/api/v1/settings", json={"tag_rules": []})
         with SessionLocal() as s:

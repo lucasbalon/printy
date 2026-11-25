@@ -23,6 +23,9 @@
   --color-media-ink: oklch(82% 0.01 80);
 }
 
+/* Phones: a shorter top bar (the destinations move to a bottom tab bar) */
+@media (max-width: 40rem) { :root { --topbar-h: 52px; } }
+
 /* Dark: the Terrazzo black colourway, adapted to a working screen */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {

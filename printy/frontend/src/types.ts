@@ -268,10 +268,25 @@ export interface FinishResult {
   margin_pct: number;
   planned_g: number;
   available_g: number;
-  tag: string | null;
+  tags: string[]; // empty: every model
   suggested_tags: string[];
+  rules: { index: number; tag: string }[]; // remembered tags that apply to this spool
   candidates: number;
   proposals: FinishProposal[];
+  catalog: FinishCatalogItem[]; // every model that fits the spool, to compose by hand
+}
+
+export interface FinishCatalogItem {
+  sliced_id: number;
+  model_id: number;
+  model_name: string;
+  label: string;
+  filament_g: number;
+  need_g: number; // with the margin
+  pieces: number;
+  duration_s: number;
+  stock: number;
+  alert: number | null;
 }
 
 export interface SpoolList {

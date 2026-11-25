@@ -143,7 +143,6 @@ const pendingCount = computed(() => state.pending);
 
 /* Phones (and the Home Assistant companion app): the destinations move to a bottom tab bar */
 @media (max-width: 40rem) {
-  .topbar__inner { height: 52px; }
   .wordmark { font-size: var(--text-lg); }
   .nav {
     position: fixed;
@@ -168,6 +167,6 @@ const pendingCount = computed(() => state.pending);
   .nav__icon { display: block; width: 22px; height: 22px; }
   .nav__link::after { top: -2px; bottom: auto; left: 0; right: 0; transform-origin: top; }
   .nav__count { position: absolute; top: var(--space-2xs); left: calc(50% + 6px); }
-  main { padding-bottom: 76px; }
+  main { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
 }
 </style>
