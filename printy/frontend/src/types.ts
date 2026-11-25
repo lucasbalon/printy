@@ -210,6 +210,7 @@ export interface Job {
   previous_spool_id?: number | null;
   low_filament?: boolean;
   spool_remaining_g?: number | null;
+  filament_needed_g?: number | null;
   waits_for_print?: boolean;
   energy_wh: number | null;
   stock_added: number;

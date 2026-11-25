@@ -81,7 +81,8 @@ async def _filament(s: Session, extra: list | None = None) -> dict:
         .options(joinedload(Job.sliced_file))
     ).unique().all()
     loaded = {p.id: p.loaded_spool_id for p in s.scalars(select(Printer))}
-    return filament_plan(list(open_jobs) + (extra or []), loaded, await spoolman.spools_or_empty())
+    jobs = list(open_jobs) + (extra or [])
+    return filament_plan(jobs, loaded, await spoolman.spools_or_empty(), manager.deducted(jobs))
 
 
 class PreviewIn(BaseModel):

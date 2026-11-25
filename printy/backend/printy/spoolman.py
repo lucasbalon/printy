@@ -287,14 +287,23 @@ class JobFilament:
     previous_spool_id: int | None = None
     low_filament: bool = False  # the spool will not have enough left
     remaining_before_g: float | None = None
+    need_g: float | None = None  # filament still to take from the spool for this job
 
 
-def plan(jobs: list[Any], loaded: dict[int, int | None], spools: list[Spool]) -> dict[int, JobFilament]:
+def plan(
+    jobs: list[Any],
+    loaded: dict[int, int | None],
+    spools: list[Spool],
+    deducted: dict[int, float] | None = None,
+) -> dict[int, JobFilament]:
     """Walks open jobs in time order: which ones need a spool change, which ones run dry.
 
     `jobs`: open jobs (objects with id, printer_id, spool_id, start_at, sliced_file.filament_g).
     `loaded`: spool currently loaded per printer id.
+    `deducted`: share (0..1) of a running job's filament already taken off its spool in
+    Spoolman (Moonraker reports it live): only the rest is still needed.
     """
+    deducted = deducted or {}
     remaining = {s.id: s.remaining_g for s in spools}
     current = dict(loaded)
     out: dict[int, JobFilament] = {}
@@ -307,6 +316,9 @@ def plan(jobs: list[Any], loaded: dict[int, int | None], spools: list[Spool]) ->
                 info.previous_spool_id = before
             current[job.printer_id] = job.spool_id
             need = job.sliced_file.filament_g
+            if need:
+                need = need * (1 - min(1.0, max(0.0, deducted.get(job.id, 0.0))))
+                info.need_g = round(need, 1)
             left = remaining.get(job.spool_id)
             if left is not None:
                 info.remaining_before_g = round(left, 1)

@@ -615,7 +615,7 @@ class Scheduler:
         spools = await spoolman.spools_or_empty()
         by_id = {sp.id: sp for sp in spools}
         loaded = {p.id: p.loaded_spool_id for p in s.query(Printer).all()}
-        fil = spoolman_plan(list(open_jobs), loaded, spools)
+        fil = spoolman_plan(list(open_jobs), loaded, spools, manager.deducted(list(open_jobs)))
         lines: list[str] = []
         swaps: list[Job] = []
         for job in sorted(open_jobs, key=lambda j: j.start_at):

@@ -224,7 +224,7 @@ async function markDefect() {
             <AlertTriangle aria-hidden="true" />
             <span>
               Filament insuffisant : il restera {{ grams(job.spool_remaining_g) }} sur la bobine, l’impression en demande
-              {{ grams(job.filament_g) }}.
+              encore {{ grams(job.filament_needed_g ?? job.filament_g) }}.
             </span>
           </p>
         </template>

@@ -46,6 +46,19 @@ def test_plan_changes_and_shortage():
     assert out[3].spool_change and out[3].previous_spool_id == 2
 
 
+def test_plan_running_job_counts_only_what_is_left():
+    # 60 g print, half done: Moonraker already took 30 g off the spool in Spoolman
+    running = SimpleNamespace(
+        id=1, printer_id=1, spool_id=2, start_at=utcnow() - timedelta(hours=1),
+        sliced_file=SimpleNamespace(filament_g=60),
+    )
+    # Spoolman shows 50 g left; 30 g of the 60 g are still to print
+    assert plan([running], {1: 2}, [BLACK])[1].low_filament
+    out = plan([running], {1: 2}, [BLACK], {1: 0.5})
+    assert not out[1].low_filament
+    assert out[1].need_g == 30
+
+
 def test_spool_change_flow(monkeypatch):
     init_db()
     sent, used = [], []

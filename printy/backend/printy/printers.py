@@ -60,6 +60,18 @@ class PrinterManager:
         live = self.live.get(printer_id)
         return live is not None and live.tracking is not None
 
+    def deducted(self, jobs: list) -> dict[int, float]:
+        """Share of each running job's filament that Moonraker already took off its spool
+        in Spoolman, so it is not counted a second time against what is left."""
+        out: dict[int, float] = {}
+        for job in jobs:
+            if getattr(job, "status", None) not in ("printing", "paused") or not self.tracked(job.printer_id):
+                continue
+            progress = self.status(job.printer_id).progress
+            if progress:
+                out[job.id] = min(1.0, progress)
+        return out
+
     async def sync(self) -> None:
         """Create, replace or drop drivers to match the database."""
         async with self._lock:

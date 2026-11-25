@@ -171,6 +171,7 @@ def job(j: Job, *, events: bool = False, filament: Any = None) -> dict[str, Any]
         data["previous_spool_id"] = filament.previous_spool_id
         data["low_filament"] = filament.low_filament
         data["spool_remaining_g"] = filament.remaining_before_g
+        data["filament_needed_g"] = filament.need_g
     if events:
         data["events"] = [{"at": e.at.isoformat(), "kind": e.kind, "message": e.message} for e in j.events]
     return data
