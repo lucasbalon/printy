@@ -206,6 +206,7 @@ export interface Job {
   events?: JobEvent[];
   spool_id: number | null;
   filament_used_g: number | null;
+  progress_end: number | null; // 0..1 reached by an ended print
   spool_change?: boolean;
   previous_spool_id?: number | null;
   low_filament?: boolean;

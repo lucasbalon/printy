@@ -145,6 +145,11 @@ async def printer_action(printer_id: int, body: ActionIn, s: DB):
         await getattr(driver, body.action)()
     except DriverError as exc:
         raise HTTPException(409, str(exc)) from exc
+    if body.action == "pause":
+        for job_id in s.scalars(
+            select(Job.id).where(Job.printer_id == printer_id, Job.status == JobStatus.PRINTING.value)
+        ):
+            scheduler.paused_by_user(job_id)
     if body.action == "cancel":
         running = s.scalars(
             select(Job.id).where(

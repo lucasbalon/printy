@@ -5,13 +5,17 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Session, joinedload
 
+from . import settings as settings_store
 from .config import config
 from .db import utcnow
-from .models import CLOSED_STATUSES, NOT_STARTED_STATUSES, Job, JobEvent, JobStatus
+from .models import CLOSED_STATUSES, NOT_STARTED_STATUSES, OPEN_STATUSES, Job, JobEvent, JobStatus, Printer
 from .printers import manager
 from .settings import tune
+from .spoolman import JobFilament, spoolman
+from .spoolman import plan as spoolman_plan
 
 SNAPSHOT_DIR = config.data_dir / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -25,6 +29,29 @@ def add_event(job: Job, kind: str, message: str = "") -> None:
 def remote_name(job: Job) -> str:
     """The file name on the printer, which also tells Printy's prints from the others."""
     return f"printy-{job.id}-{Path(job.sliced_file.filename).name}".replace(" ", "_")
+
+
+async def filament_forecast(s: Session, extra: list | None = None) -> dict[int, JobFilament]:
+    """Spool changes and filament shortages over all open jobs (plus `extra`, not saved)."""
+    settings_store.get_all(s)  # also applies the margin settings
+    open_jobs = s.scalars(
+        select(Job)
+        # jobs waiting for the user will not run on their own: they do not load a spool
+        .where(Job.status.in_([st.value for st in OPEN_STATUSES if st != JobStatus.NEEDS_ATTENTION]))
+        .options(joinedload(Job.sliced_file), joinedload(Job.printer))
+    ).unique().all()
+    loaded = {p.id: p.loaded_spool_id for p in s.scalars(select(Printer))}
+    jobs = list(open_jobs) + (extra or [])
+    return spoolman_plan(jobs, loaded, await spoolman.spools_or_empty(), manager.deducted(jobs))
+
+
+def filament_short(info: JobFilament | None) -> str:
+    """"La bobine n’a plus qu’environ 125 g pour 151 g nécessaires." or ""."""
+    if info is None or not info.low_filament:
+        return ""
+    if info.remaining_before_g is not None and info.need_g is not None:
+        return f"La bobine n’a plus qu’environ {info.remaining_before_g:g} g pour {info.need_g:g} g nécessaires."
+    return "La bobine risque de ne pas suffire."
 
 
 def minutes_label(m: int) -> str:

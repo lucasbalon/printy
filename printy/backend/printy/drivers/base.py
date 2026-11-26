@@ -127,6 +127,10 @@ class PrinterDriver(ABC):
     async def snapshot(self) -> bytes | None:
         return None
 
+    def raw_state(self) -> str:
+        """What the printer itself last reported, for the diagnosis of a failed start."""
+        return ""
+
     async def spool_tracking(self) -> SpoolTracking | None:
         """None when the printer does not report filament use to Spoolman itself."""
         return None

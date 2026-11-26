@@ -176,7 +176,7 @@ def test_print_started_outside_printy():
 
 
 def test_ignored_start_is_not_taken_for_a_cancel(monkeypatch):
-    """The printer accepts the file but never starts: wait, then flag it (no false cancel)."""
+    """The printer never takes the start command: asked again once, then flagged (no false cancel)."""
     init_db()
     sent = []
 
@@ -203,38 +203,81 @@ def test_ignored_start_is_not_taken_for_a_cancel(monkeypatch):
         with SessionLocal() as s:
             return s.get(Job, jid)
 
+    def kinds():
+        with SessionLocal() as s:
+            return [e.kind for e in s.get(Job, jid).events]
+
     loop = asyncio.new_event_loop()
     loop.run_until_complete(manager.sync())
+    starts = []
 
     async def ignored(name):
-        return None
+        starts.append(name)
 
     monkeypatch.setattr(manager.live[pid].driver, "start", ignored)
     for _ in range(4):
         loop.run_until_complete(step())
         loop.run_until_complete(asyncio.sleep(0.05))
     assert job().status == "starting"
+    assert len(starts) == 1
 
-    # two minutes later, still idle: heating or calibrating, keep waiting
+    # a minute later the printer still shows nothing of our file: the command is sent again
     with SessionLocal() as s:
         s.get(Job, jid).started_at = utcnow() - timedelta(minutes=2)
         s.commit()
     loop.run_until_complete(step())
     assert job().status == "starting"
+    assert len(starts) == 2
+    assert "start_resent" in kinds()
 
     # a stale "finished" from the previous print is not taken for the end of this one
     manager.live[pid].driver.state = PrinterState.FINISHED
     loop.run_until_complete(step())
     assert job().status == "starting"
+    assert len(starts) == 2  # only once
 
-    # past the grace period: flagged, not counted as a finished or interrupted print
-    with SessionLocal() as s:
-        s.get(Job, jid).started_at = utcnow() - timedelta(minutes=11)
-        s.commit()
+    # still nothing a minute after the second try: flagged, with what the printer reported
+    scheduler._start_resent[jid] -= 61
     loop.run_until_complete(step())
     assert job().status == "needs_attention"
+    assert "diagnostic" in kinds()
     assert "à revoir" in sent[-1]  # the phone is told
     loop.close()
+
+
+def test_acknowledged_start_waits_for_heating(monkeypatch):
+    """The printer took our file (busy heating): no second start, the long grace applies."""
+    init_db()
+    monkeypatch.setattr(ha, "notify", _quiet_notify)
+    client = TestClient(app)
+    pid, sliced_id = _setup(client, "chauffe")
+    jid = client.post("/api/v1/jobs", json={
+        "sliced_file_id": sliced_id, "printer_id": pid, "start_at": utcnow().isoformat(), "confirm_required": False,
+    }).json()["id"]
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(manager.sync())
+    starts = []
+
+    async def heating(name):
+        starts.append(name)
+        manager.live[pid].driver.state = PrinterState.BUSY
+
+    monkeypatch.setattr(manager.live[pid].driver, "start", heating)
+    for _ in range(4):
+        loop.run_until_complete(_step())
+        loop.run_until_complete(asyncio.sleep(0.05))
+    with SessionLocal() as s:
+        s.get(Job, jid).started_at = utcnow() - timedelta(minutes=5)
+        s.commit()
+    loop.run_until_complete(_step())
+    with SessionLocal() as s:
+        assert s.get(Job, jid).status == "starting"
+    assert len(starts) == 1
+    loop.close()
+
+
+async def _quiet_notify(*args, **kwargs):
+    return None
 
 
 def _setup(client, name):
@@ -407,4 +450,55 @@ def test_stop_from_printy_closes_the_job_at_once():
     assert client.post("/api/v1/jobs", json={
         "sliced_file_id": sliced_id, "printer_id": pid, "start_at": utcnow().isoformat(), "start_now": True,
     }).status_code == 201
+    loop.close()
+
+
+def test_unasked_pause_is_notified_and_stop_keeps_progress(monkeypatch):
+    """A pause from the printer (filament out) reaches the phone; one asked from Printy does
+    not. A print stopped along the way keeps how far it went and stays in the planning."""
+    init_db()
+    sent = []
+
+    async def fake_notify(targets, title, message, **kw):
+        sent.append((title, message))
+
+    monkeypatch.setattr(ha, "notify", fake_notify)
+    client = TestClient(app)
+    pid, sliced_id = _setup(client, "pause")
+    jid = client.post("/api/v1/jobs", json={
+        "sliced_file_id": sliced_id, "printer_id": pid, "start_at": utcnow().isoformat(), "start_now": True,
+    }).json()["id"]
+    loop = asyncio.new_event_loop()
+    for _ in range(3):
+        loop.run_until_complete(_step())
+        loop.run_until_complete(asyncio.sleep(0.05))
+    assert _status(jid) == "printing"
+    driver = manager.live[pid].driver
+
+    # paused from Printy: nothing sent
+    assert client.post(f"/api/v1/printers/{pid}/action", json={"action": "pause"}).status_code == 200
+    loop.run_until_complete(_step())
+    assert _status(jid) == "paused"
+    assert not any("en pause" in t for t, _ in sent)
+    loop.run_until_complete(driver.resume())
+    loop.run_until_complete(_step())
+    assert _status(jid) == "printing"
+
+    # paused by the printer itself, half way: the phone is told
+    driver.elapsed = driver.duration / 2
+    driver.state = PrinterState.PAUSED
+    loop.run_until_complete(_step())
+    assert any("en pause" in t and "50 %" in m for t, m in sent)
+
+    # then stopped on the printer: cancelled at 50 %, its real length kept
+    with SessionLocal() as s:
+        s.get(Job, jid).started_at = utcnow() - timedelta(minutes=30)
+        s.commit()
+    driver.state = PrinterState.IDLE
+    loop.run_until_complete(_step())
+    data = client.get(f"/api/v1/jobs/{jid}").json()
+    assert data["status"] == "cancelled"
+    assert data["progress_end"] == 0.5
+    assert data["end_at"] == data["finished_at"]
+    assert any(e["kind"] == "cancelled" and "à 50 %" in e["message"] for e in data["events"])
     loop.close()

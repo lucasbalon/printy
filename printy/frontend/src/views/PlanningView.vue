@@ -96,12 +96,27 @@ interface Segment {
   startsHere: boolean;
 }
 
+// a print stopped along the way stays visible (how far it went); one cancelled before
+// printing anything leaves the planning
+function onPlanning(job: Job): boolean {
+  return job.status !== "cancelled" || (job.progress_end ?? 0) > 0;
+}
+
+// "arrêtée à 83 %" for a print that ended before its end
+function stoppedLabel(job: Job): string {
+  if (job.progress_end == null || job.progress_end >= 1) return "";
+  const pct = `${Math.round(job.progress_end * 100)} %`;
+  if (job.status === "cancelled") return `arrêtée à ${pct}`;
+  if (job.status === "failed") return `échec à ${pct}`;
+  return "";
+}
+
 function segmentsFor(day: Date, printerId: number): Segment[] {
   const dayStart = startOfDay(day).getTime();
   const dayEnd = addDays(day, 1).getTime();
   const out: Segment[] = [];
   for (const job of jobs.value) {
-    if (job.printer_id !== printerId || job.status === "cancelled") continue;
+    if (job.printer_id !== printerId || !onPlanning(job)) continue;
     const s = new Date(job.start_at).getTime();
     const e = Math.max(new Date(job.end_at).getTime(), s + 15 * 60_000);
     if (e <= dayStart || s >= dayEnd) continue;
@@ -201,6 +216,7 @@ function blockClass(job: Job) {
     "block--active": ["printing", "paused", "starting", "powering_on", "ready"].includes(job.status),
     "block--done": job.status === "finished",
     "block--failed": job.status === "failed",
+    "block--stopped": job.status === "cancelled",
     "block--movable": MOVABLE.includes(job.status),
   };
 }
@@ -560,7 +576,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
                   :style="{ top: `${seg.top}px`, height: `${seg.height}px`, '--filament': spoolById(seg.job.spool_id)?.color ?? seg.job.color ?? 'var(--color-paper-3)' }"
                   role="button"
                   tabindex="0"
-                  :aria-label="`${seg.job.model_name}, ${when(seg.job.start_at)}${seg.job.waits_for_print ? ', attendra la fin de l’impression en cours' : ''}${seg.job.spool_change ? ', changement de bobine' : ''}${seg.job.low_filament ? ', filament insuffisant' : ''}`"
+                  :aria-label="`${seg.job.model_name}, ${when(seg.job.start_at)}${seg.job.waits_for_print ? ', attendra la fin de l’impression en cours' : ''}${seg.job.spool_change ? ', changement de bobine' : ''}${seg.job.low_filament ? ', filament insuffisant' : ''}${stoppedLabel(seg.job) ? `, ${stoppedLabel(seg.job)}` : ''}`"
                   @pointerdown="onBlockDown($event, seg)"
                   @click="onBlockClick(seg)"
                   @keydown="onBlockKey($event, seg.job)"
@@ -580,14 +596,20 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
                     Mettre {{ spoolById(seg.job.spool_id)?.label ?? "la bobine prévue" }}
                   </span>
                   <span v-if="seg.height > 64" class="block__meta">
-                    {{ (seg.job.status === "printing" || seg.job.status === "paused") && seg.job.remaining_s != null
-                      ? `reste ${duration(seg.job.remaining_s)}`
-                      : duration(seg.job.duration_s) }}
+                    {{ stoppedLabel(seg.job)
+                      || ((seg.job.status === "printing" || seg.job.status === "paused") && seg.job.remaining_s != null
+                        ? `reste ${duration(seg.job.remaining_s)}`
+                        : duration(seg.job.duration_s)) }}
                   </span>
                   <span
                     v-if="seg.job.status === 'printing' && seg.job.progress != null"
                     class="block__progress"
                     :style="{ transform: `scaleX(${seg.job.progress})` }"
+                  />
+                  <span
+                    v-else-if="stoppedLabel(seg.job)"
+                    class="block__progress block__progress--stopped"
+                    :style="{ transform: `scaleX(${seg.job.progress_end})` }"
                   />
                 </div>
                 <template v-for="ext in [externalFor(d, p.id)]" :key="`ext-${p.id}`">
@@ -739,6 +761,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
 .block--attention { background: var(--color-accent); color: var(--color-accent-ink); border-color: var(--color-accent); }
 .block--done { background: var(--color-paper-2); color: var(--color-muted); border-color: var(--color-rule); }
 .block--failed { background: var(--color-error-soft); color: var(--color-error); border-color: var(--color-error); }
+.block--stopped { background: var(--color-paper-2); color: var(--color-muted); border-color: var(--color-error); border-style: dashed; }
 .block.is-ghosted { opacity: 0.35; }
 .block.is-held { box-shadow: inset 4px 0 0 var(--filament), 3px 3px 0 var(--color-ink); transform: translate(-1px, -1px); }
 .block--live { background: var(--color-accent-soft); border-style: dashed; cursor: pointer; }
@@ -752,6 +775,7 @@ const weekHours = computed(() => weekJobs.value.reduce((acc, j) => acc + j.durat
 .block__swap { display: flex; align-items: center; gap: var(--space-3xs); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .block__swap .swatch { flex: none; }
 .block__progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--color-accent); transform-origin: left; transition: transform var(--dur-long) var(--ease-out); }
+.block__progress--stopped { background: var(--color-error); }
 
 .ghost {
   position: absolute;

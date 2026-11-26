@@ -13,11 +13,11 @@ from . import settings as settings_store
 from .config import config
 from .db import utcnow
 from .ha import NotifyAction, ha
-from .models import OPEN_STATUSES, Job, JobStatus, Printer
+from .job_ops import filament_forecast
+from .models import Job, JobStatus, Printer
 from .printers import manager
 from .settings import tune
 from .spoolman import describe, spoolman
-from .spoolman import plan as spoolman_plan
 
 
 async def morning(s: Session, opts: dict) -> None:
@@ -33,22 +33,18 @@ async def morning(s: Session, opts: dict) -> None:
     settings_store.set_many(s, {"spool_reminder_sent_on": today})
 
     horizon = now + timedelta(days=1)
-    open_jobs = list(
-        s.scalars(
-            select(Job)
-            .where(Job.status.in_([st.value for st in OPEN_STATUSES if st != JobStatus.NEEDS_ATTENTION]))
-            .options(joinedload(Job.sliced_file), joinedload(Job.printer))
-        ).unique().all()
-    )
-    spools = await spoolman.spools_or_empty()
-    by_id = {sp.id: sp for sp in spools}
-    loaded = {p.id: p.loaded_spool_id for p in s.query(Printer).all()}
-    fil = spoolman_plan(open_jobs, loaded, spools, manager.deducted(open_jobs))
+    open_jobs = s.scalars(
+        select(Job)
+        .where(Job.status == JobStatus.SCHEDULED.value, Job.start_at <= horizon)
+        .options(joinedload(Job.sliced_file), joinedload(Job.printer))
+    ).unique().all()
+    by_id = {sp.id: sp for sp in await spoolman.spools_or_empty()}
+    fil = await filament_forecast(s)
     lines: list[str] = []
     swaps: list[Job] = []
     for job in sorted(open_jobs, key=lambda j: j.start_at):
         info = fil.get(job.id)
-        if info is None or job.status != JobStatus.SCHEDULED or job.start_at > horizon:
+        if info is None:
             continue
         when = job.start_at.astimezone(config.timezone).strftime("%H:%M")
         sp = by_id.get(job.spool_id) if job.spool_id is not None else None

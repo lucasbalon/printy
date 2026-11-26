@@ -133,6 +133,15 @@ def _window(printer_id: int) -> dict[str, Any]:
     }
 
 
+def _progress_end(j: Job) -> float | None:
+    """How far an ended print went (older prints: from the filament it used)."""
+    if j.progress_end is not None:
+        return j.progress_end
+    if j.finished_at is not None and j.filament_used_g and j.sliced_file.filament_g:
+        return round(min(1.0, j.filament_used_g / j.sliced_file.filament_g), 3)
+    return None
+
+
 def job(j: Job, *, events: bool = False, filament: Any = None) -> dict[str, Any]:
     f = j.sliced_file
     data: dict[str, Any] = {
@@ -157,6 +166,7 @@ def job(j: Job, *, events: bool = False, filament: Any = None) -> dict[str, Any]
         "note": j.note,
         "spool_id": j.spool_id,
         "filament_used_g": j.filament_used_g,
+        "progress_end": _progress_end(j),
         "energy_wh": j.energy_wh,
         "stock_added": j.stock_added or 0,
     }

@@ -188,6 +188,7 @@ class Job(Base):
     note: Mapped[str] = mapped_column(Text, default="")
     spool_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # Spoolman id
     filament_used_g: Mapped[float | None] = mapped_column(Float, nullable=True)
+    progress_end: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0..1 reached when it ended
     spool_reported: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     # production (V3)
     energy_wh: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -202,6 +203,8 @@ class Job(Base):
 
     @property
     def end_at(self) -> datetime:
+        if self.started_at is not None and self.finished_at is not None:
+            return self.finished_at  # ended: its real length, pauses included
         base = self.started_at or self.start_at
         return base + timedelta(seconds=self.duration_s)
 

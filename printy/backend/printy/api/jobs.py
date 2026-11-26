@@ -19,7 +19,6 @@ from ..models import CLOSED_STATUSES, OPEN_STATUSES, Job, JobStatus, Printer, Sl
 from ..printers import manager
 from ..job_ops import SNAPSHOT_DIR, add_event
 from ..scheduler import scheduler
-from ..spoolman import plan as filament_plan
 from ..spoolman import spoolman, suggest
 from . import serialize
 
@@ -72,17 +71,7 @@ def _check_slot(s: Session, printer_id: int, start: datetime, duration_s: int, e
 
 
 async def _filament(s: Session, extra: list | None = None) -> dict:
-    """Spool changes and filament shortages over all open jobs (plus `extra`, not saved)."""
-    settings_store.get_all(s)
-    open_jobs = s.scalars(
-        select(Job)
-        # jobs waiting for the user will not run on their own: they do not load a spool
-        .where(Job.status.in_([st.value for st in OPEN_STATUSES if st != JobStatus.NEEDS_ATTENTION]))
-        .options(joinedload(Job.sliced_file))
-    ).unique().all()
-    loaded = {p.id: p.loaded_spool_id for p in s.scalars(select(Printer))}
-    jobs = list(open_jobs) + (extra or [])
-    return filament_plan(jobs, loaded, await spoolman.spools_or_empty(), manager.deducted(jobs))
+    return await job_ops.filament_forecast(s, extra)
 
 
 class PreviewIn(BaseModel):

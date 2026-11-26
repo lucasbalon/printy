@@ -18,7 +18,7 @@ import time
 from datetime import timedelta
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, object_session
 
 from . import bedcheck, photos, power, production, reminders, usage
 from . import settings as settings_store
@@ -32,6 +32,8 @@ from .job_ops import (
     arm_power_off,
     cancel,
     confirm,
+    filament_forecast,
+    filament_short,
     minutes_label,
     remote_name,
     remove,
@@ -46,6 +48,12 @@ from .spoolman import describe, spoolman
 log = logging.getLogger(__name__)
 
 TICK_S = 5  # delays and thresholds: settings.Tunables (shown in the settings)
+START_ACK_S = 60  # the printer shows our file within seconds of the start command
+
+
+def percent(progress: float) -> str:
+    """" à 83 %." for a print stopped along the way, "." otherwise."""
+    return f" à {round(progress * 100)} %." if 0 < progress < 1 else "."
 
 
 class Scheduler:
@@ -56,6 +64,8 @@ class Scheduler:
         self._last_progress: dict[int, float] = {}
         self._launching: set[int] = set()  # jobs whose file is being sent right now
         self._stopped: set[int] = set()  # jobs the user stopped from Printy: no start grace
+        self._paused_by_user: set[int] = set()  # paused from Printy: no "paused" notification
+        self._start_resent: dict[int, float] = {}  # job id -> start command sent again (monotonic)
         self._offline: dict[int, bool] = {}  # printer id -> offline at the last tick
         self._online_at: dict[int, float] = {}  # printer id -> back online since (monotonic)
         self._metered_at: dict[int, float] = {}  # job id -> last energy sample (monotonic)
@@ -140,6 +150,9 @@ class Scheduler:
 
     def launching(self, job_id: int) -> bool:
         return job_id in self._launching
+
+    def paused_by_user(self, job_id: int) -> None:
+        self._paused_by_user.add(job_id)
 
     def stopped_by_user(self, job_id: int) -> None:
         """The user stopped the print from Printy: an idle printer now means "cancelled"."""
@@ -325,6 +338,14 @@ class Scheduler:
             start_label = "Lancer"
         if hint:
             message += f" {hint}"
+        try:
+            s = object_session(job)
+            short = filament_short((await filament_forecast(s)).get(job.id)) if s is not None else ""
+        except Exception as exc:  # noqa: BLE001 - only a warning
+            log.debug("filament forecast: %s", exc)
+            short = ""
+        if short:
+            message += f" Attention : {short[0].lower()}{short[1:]}"
         if again:
             title = f"Rappel : {title}"
             message += " Sans réponse, elle ne sera pas lancée."
@@ -439,17 +460,78 @@ class Scheduler:
         ours = bool(status.file) and status.file.rsplit("/", 1)[-1] == remote_name(job)
         # a "finished" with our file name is this very print (a short one), not the previous one
         if status.state in (PrinterState.PRINTING, PrinterState.PAUSED) or (ours and status.state == PrinterState.FINISHED):
+            self._start_resent.pop(job.id, None)
             job.status = JobStatus.PRINTING
             add_event(job, "started", "Impression lancée.")
+            await self._warn_low_filament(s, job, opts)
             return
         waited = utcnow() - job.started_at
+        # The start command gets no answer: the printer taking our file is the receipt.
+        # A K2 shows it within seconds; without it, the command was lost. (Offline: the
+        # printer cannot be read, so nothing is concluded before the usual grace.)
+        if not ours and status.state not in (PrinterState.BUSY, PrinterState.OFFLINE):
+            resent = self._start_resent.get(job.id)
+            if resent is None and waited >= timedelta(seconds=START_ACK_S):
+                await self._resend_start(job, opts)
+                return
+            if resent is not None and time.monotonic() - resent >= START_ACK_S:
+                self._start_resent.pop(job.id, None)
+                self._diagnose(job, status)
+                job.started_at = None
+                await self._needs_attention(job, opts, "L’imprimante n’a pas pris en compte la commande de démarrage (deux essais).")
+                return
+            job.message = "Démarrage demandé, en attente de l’imprimante."
+            return
         grace = tune.busy_grace_min if status.state == PrinterState.BUSY else tune.start_grace_min
         if waited < timedelta(minutes=grace):
             job.message = "L’imprimante prépare l’impression (chauffe, calibrage)."
             return
         # never seen printing: the start command was ignored, nothing was printed
+        self._start_resent.pop(job.id, None)
+        self._diagnose(job, status)
         job.started_at = None
         await self._needs_attention(job, opts, "Le fichier a été envoyé mais l’imprimante n’a pas démarré l’impression.")
+
+    async def _resend_start(self, job: Job, opts: dict) -> None:
+        self._start_resent[job.id] = time.monotonic()
+        driver = manager.driver(job.printer_id)
+        try:
+            if driver is None:
+                raise DriverError("Pilote d’imprimante indisponible.")
+            await driver.start(remote_name(job))
+        except Exception as exc:  # noqa: BLE001
+            self._start_resent.pop(job.id, None)
+            job.started_at = None
+            await self._needs_attention(job, opts, f"Démarrage impossible : {exc or exc.__class__.__name__}.", kind="error")
+            return
+        add_event(job, "start_resent", "Pas de réaction de l’imprimante : démarrage redemandé.")
+
+    @staticmethod
+    def _diagnose(job: Job, status) -> None:  # noqa: ANN001
+        """Keeps what the printer reported, to understand a start that never came."""
+        driver = manager.driver(job.printer_id)
+        raw = driver.raw_state() if driver else ""
+        detail = f"État vu : {status.state}" + (f", fichier {status.file}" if status.file else "") + (f" ({raw})" if raw else "")
+        log.warning("job %s not started on the printer: %s", job.id, detail)
+        add_event(job, "diagnostic", detail + ".")
+
+    async def _warn_low_filament(self, s: Session, job: Job, opts: dict) -> None:
+        """The print is running on a spool that will not last: said now, not at the pause."""
+        try:
+            short = filament_short((await filament_forecast(s)).get(job.id))
+        except Exception as exc:  # noqa: BLE001 - only a warning
+            log.debug("filament forecast: %s", exc)
+            return
+        if not short:
+            return
+        add_event(job, "low_filament", f"Lancée avec trop peu de filament. {short}")
+        await ha.notify(
+            opts["notify_targets"],
+            f"{job.printer.name} : filament insuffisant",
+            f"{job.sliced_file.model.name} a démarré, mais elle s’arrêtera avant la fin. {short} "
+            "Prévois de changer la bobine pendant l’impression.",
+            tag=f"printy-filament-{job.id}",
+        )
 
     def _meter(self, job: Job, opts: dict) -> None:
         """Integrates the plug's power over the print (kWh per piece)."""
@@ -486,14 +568,21 @@ class Scheduler:
         if status.state == PrinterState.PAUSED and job.status != JobStatus.PAUSED:
             job.status = JobStatus.PAUSED
             add_event(job, "paused", "Impression en pause.")
+            if job.id in self._paused_by_user:
+                self._paused_by_user.discard(job.id)
+            else:
+                await self._notify_paused(job, opts)
         elif status.state == PrinterState.PRINTING and job.status == JobStatus.PAUSED:
             job.status = JobStatus.PRINTING
             add_event(job, "resumed", "Impression reprise.")
+            await self._clear_paused(job, opts)
         elif status.state == PrinterState.ERROR:
             job.status = JobStatus.FAILED
             job.finished_at = now
-            usage.record(job, self._last_progress.pop(job.id, 0))
-            add_event(job, "error", status.message or "L’imprimante signale une erreur.")
+            progress = self._last_progress.pop(job.id, 0)
+            job.progress_end = progress
+            usage.record(job, progress)
+            add_event(job, "error", f"{status.message or 'L’imprimante signale une erreur.'}{percent(progress)}")
             await self._close_print(s, job, opts, success=False)
         elif status.state in (PrinterState.FINISHED, PrinterState.IDLE):
             # The print was seen running; a K2 still flickers through several states
@@ -505,7 +594,9 @@ class Scheduler:
             done = status.state == PrinterState.FINISHED or progress > 0.98
             job.finished_at = now
             job.printer.last_finished_at = now
-            usage.record(job, 1.0 if done else progress)
+            job.progress_end = 1.0 if done else progress
+            usage.record(job, job.progress_end)
+            await self._clear_paused(job, opts)
             if done:
                 job.status = JobStatus.FINISHED
                 add_event(job, "finished", "Impression terminée.")
@@ -513,8 +604,29 @@ class Scheduler:
                 await self._notify_finished(s, job)
             else:
                 job.status = JobStatus.CANCELLED
-                add_event(job, "cancelled", "Impression interrompue sur l’imprimante.")
+                add_event(job, "cancelled", f"Impression interrompue sur l’imprimante{percent(progress)}")
                 await self._close_print(s, job, opts, success=False)
+
+    @staticmethod
+    async def _clear_paused(job: Job, opts: dict) -> None:
+        if any(e.kind == "paused" for e in job.events):
+            await ha.clear(opts["notify_targets"] or [], f"printy-paused-{job.id}")
+
+    async def _notify_paused(self, job: Job, opts: dict) -> None:
+        """A pause nobody asked for from Printy: most often the filament ran out.
+        The printer waits, but not forever: the user must know now, even at night."""
+        progress = self._last_progress.get(job.id)
+        done = f" à {round(progress * 100)} %" if progress else ""
+        image = await photos.capture(job)
+        await ha.notify(
+            opts["notify_targets"],
+            f"{job.printer.name} : impression en pause",
+            f"{job.sliced_file.model.name} s’est arrêtée{done}, sans doute faute de filament. "
+            "Change la bobine puis reprends l’impression depuis l’écran de l’imprimante.",
+            image=image,
+            tag=f"printy-paused-{job.id}",
+            urgent=True,
+        )
 
     async def _notify_finished(self, s: Session, job: Job) -> None:
         opts = settings_store.get_all(s)

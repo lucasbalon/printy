@@ -143,6 +143,13 @@ class CrealityDriver(PrinterDriver):
             elapsed_s=int(spent) if spent else None,
         )
 
+    def raw_state(self) -> str:
+        keys = ("state", "deviceState", "printProgress", "printFileName", "printLeftTime", "nozzleTemp", "bedTemp0", "err")
+        parts = [f"{k}={self._state[k]}" for k in keys if k in self._state]
+        if not self._connected.is_set():
+            parts.insert(0, "déconnectée")
+        return ", ".join(parts)
+
     async def fresh_status(self) -> PrinterStatus:
         """The pushed state may be old (a half-open connection keeps it): ask the printer
         for its parameters and only trust an answer received now."""
