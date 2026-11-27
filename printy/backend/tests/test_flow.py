@@ -221,9 +221,9 @@ def test_ignored_start_is_not_taken_for_a_cancel(monkeypatch):
     assert job().status == "starting"
     assert len(starts) == 1
 
-    # a minute later the printer still shows nothing of our file: the command is sent again
+    # two minutes later the printer still shows nothing of our file: the command is sent again
     with SessionLocal() as s:
-        s.get(Job, jid).started_at = utcnow() - timedelta(minutes=2)
+        s.get(Job, jid).started_at = utcnow() - timedelta(minutes=3)
         s.commit()
     loop.run_until_complete(step())
     assert job().status == "starting"
@@ -236,8 +236,8 @@ def test_ignored_start_is_not_taken_for_a_cancel(monkeypatch):
     assert job().status == "starting"
     assert len(starts) == 2  # only once
 
-    # still nothing a minute after the second try: flagged, with what the printer reported
-    scheduler._start_resent[jid] -= 61
+    # still nothing two minutes after the second try: flagged, with what the printer reported
+    scheduler._start_resent[jid] -= 121
     loop.run_until_complete(step())
     assert job().status == "needs_attention"
     assert "diagnostic" in kinds()

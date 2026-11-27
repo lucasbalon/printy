@@ -75,13 +75,17 @@ class MoonrakerClient:
             return False
         return True
 
-    async def upload(self, path: Path, remote_name: str) -> None:
+    async def upload(self, path: Path, remote_name: str, *, start: bool = False) -> None:
+        """start: Moonraker launches the print itself once the file is stored ("upload and print")."""
+        data = {"root": "gcodes"}
+        if start:
+            data["print"] = "true"
         try:
             with path.open("rb") as fh:
                 r = await self.http.post(
                     "/server/files/upload",
                     files={"file": (remote_name, fh, "application/octet-stream")},
-                    data={"root": "gcodes"},
+                    data=data,
                     timeout=300,
                 )
             r.raise_for_status()
@@ -136,6 +140,9 @@ class MoonrakerDriver(PrinterDriver):
 
     async def upload(self, path: Path, remote_name: str) -> None:
         await self.client.upload(path, remote_name)
+
+    async def upload_and_start(self, path: Path, remote_name: str) -> None:
+        await self.client.upload(path, remote_name, start=True)
 
     async def spool_tracking(self) -> SpoolTracking | None:
         return await self.client.spoolman_status()

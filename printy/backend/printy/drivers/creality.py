@@ -166,6 +166,11 @@ class CrealityDriver(PrinterDriver):
     async def upload(self, path: Path, remote_name: str) -> None:
         await self._uploader.upload(path, remote_name)
 
+    async def upload_and_start(self, path: Path, remote_name: str) -> None:
+        """Like the slicers' "upload and print": Moonraker starts the file as soon as it is
+        stored. Starting through the WebSocket right after the upload was often ignored."""
+        await self._uploader.upload(path, remote_name, start=True)
+
     # Moonraker on the K2 may run Spoolman's module: it then tracks filament itself
     async def spool_tracking(self) -> SpoolTracking | None:
         return await self._uploader.spoolman_status()

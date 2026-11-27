@@ -48,7 +48,7 @@ from .spoolman import describe, spoolman
 log = logging.getLogger(__name__)
 
 TICK_S = 5  # delays and thresholds: settings.Tunables (shown in the settings)
-START_ACK_S = 60  # the printer shows our file within seconds of the start command
+START_ACK_S = 120  # the printer shows our file within seconds of the start command (margin for big files)
 
 
 def percent(progress: float) -> str:
@@ -412,10 +412,10 @@ class Scheduler:
             async def send() -> None:
                 if driver is None:
                     raise DriverError("Pilote d’imprimante indisponible.")
-                await driver.upload(path, name)
+                # the spool first: it must be active when the print starts
                 if spool_id is not None and await driver.set_active_spool(spool_id):
                     manager.spool_pushed(printer_id)
-                await driver.start(name)
+                await driver.upload_and_start(path, name)
 
             try:
                 await asyncio.wait_for(send(), timeout=tune.launch_timeout_min * 60)

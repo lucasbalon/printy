@@ -115,6 +115,11 @@ class PrinterDriver(ABC):
     @abstractmethod
     async def start(self, remote_name: str) -> None: ...
 
+    async def upload_and_start(self, path: Path, remote_name: str) -> None:
+        """Sends the file and starts it, in one request when the printer allows it."""
+        await self.upload(path, remote_name)
+        await self.start(remote_name)
+
     @abstractmethod
     async def pause(self) -> None: ...
 
